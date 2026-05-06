@@ -2,28 +2,18 @@
 
 # AutoStack
 
-*Work in progress, this is the very early development.*
-
 </div>
 
 ---
 
 ### ⚠️ IMPORTANT WARNING ⚠️
 
-> **Hold on!** This project is in **VERY EARLY DEVELOPMENT**.
+> This project is in **VERY EARLY DEVELOPMENT**.
 >
 > * The current releases are incomplete.
 > * The source code is experimental.
 > * It is likely to be buggy or break without notice.
 > * **Use for testing purposes only.**
-
----
-
-### 📝 Current Internal Development Notes
-
-* Fixing Updating / Auto-Launch on PC / Language
-* Implementing Project Search bar
-* *(various other things as we are in very early development)*
 
 ---
 
