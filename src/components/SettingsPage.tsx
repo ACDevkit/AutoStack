@@ -1,5 +1,7 @@
-import { FolderOpen, ChevronDown } from "lucide-react";
+import { useEffect, useState, useRef } from "react";
+import { FolderOpen, ChevronDown, RefreshCw, CheckCircle2, AlertCircle, ArrowDownToLine } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { getVersion } from "@tauri-apps/api/app";
 import { useSettingsStore, type AppLanguage, type AppTheme } from "@/stores/settingsStore";
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -81,6 +83,17 @@ const THEMES: { value: AppTheme; label: string }[] = [
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
+// ─── Update check state ────────────────────────────────────────────────────────
+
+type UpdateStatus =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | { kind: "up-to-date" }
+  | { kind: "available"; version: string }
+  | { kind: "error"; message: string };
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
+
 export default function SettingsPage() {
   const {
     language, setLanguage,
@@ -89,11 +102,50 @@ export default function SettingsPage() {
     theme, setTheme,
   } = useSettingsStore();
 
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ kind: "idle" });
+  const [currentVersion, setCurrentVersion] = useState<string>("...");
+  const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    getVersion()
+      .then((v) => {
+        if (isMounted) setCurrentVersion(v);
+      })
+      .catch(() => {
+        if (isMounted) setCurrentVersion("unknown");
+      });
+    return () => {
+      isMounted = false;
+      if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+    };
+  }, []);
+
   async function browseForFolder() {
     const selected = await open({ directory: true, multiple: false });
     if (typeof selected === "string" && selected) {
       setDefaultProjectLocation(selected);
     }
+  }
+
+  function handleCheckForUpdate() {
+    if (updateStatus.kind === "checking") return;
+
+    // Clear any pending auto-reset.
+    if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+
+    setUpdateStatus({ kind: "checking" });
+
+    // Placeholder: simulate a network check.
+    // Replace this timeout with a real invoke() call when the backend is ready.
+    resetTimerRef.current = setTimeout(() => {
+      setUpdateStatus({ kind: "up-to-date" });
+
+      // Auto-reset back to idle after 6 s so the row doesn't stay green forever.
+      resetTimerRef.current = setTimeout(() => {
+        setUpdateStatus({ kind: "idle" });
+      }, 6_000);
+    }, 1_800);
   }
 
   return (
@@ -187,6 +239,100 @@ export default function SettingsPage() {
                   {t.label}
                 </button>
               ))}
+            </div>
+          </SettingRow>
+        </Section>
+
+        {/* Updates */}
+        <Section title="Updates">
+          <SettingRow
+            label="Updates"
+            description="Check for new releases and keep AutoStack on the latest version."
+          >
+            <div className="flex items-center gap-2">
+              <span className="inline-flex items-center h-7 px-2.5 text-[11px] font-medium rounded-md border border-border bg-secondary text-muted-foreground">
+                Current v{currentVersion}
+              </span>
+
+              {/* idle */}
+              {updateStatus.kind === "idle" && (
+                <button
+                  type="button"
+                  onClick={handleCheckForUpdate}
+                  className="inline-flex items-center gap-1.5 h-8 px-3 text-xs font-medium bg-secondary border border-border rounded-md text-foreground hover:bg-accent hover:border-ring/40 active:scale-95 transition-all duration-150"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Check for Updates
+                </button>
+              )}
+
+              {/* checking */}
+              {updateStatus.kind === "checking" && (
+                <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  Checking for updates...
+                </span>
+              )}
+
+              {/* up to date */}
+              {updateStatus.kind === "up-to-date" && (
+                <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                  Already up to date
+                </span>
+              )}
+
+              {/* update available */}
+              {updateStatus.kind === "available" && (
+                <>
+                  <span className="inline-flex items-center gap-1 text-xs font-medium text-primary">
+                    <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
+                    v{updateStatus.version} available
+                  </span>
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1.5 h-8 px-3 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 active:scale-95 transition-all duration-150"
+                  >
+                    <ArrowDownToLine className="w-3.5 h-3.5" />
+                    Download &amp; Install
+                  </button>
+                </>
+              )}
+
+              {/* error */}
+              {updateStatus.kind === "error" && (
+                <>
+                  <span className="inline-flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    {updateStatus.message}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleCheckForUpdate}
+                    className="inline-flex items-center gap-1.5 h-7 px-2.5 text-xs font-medium bg-secondary border border-border rounded-md text-muted-foreground hover:text-foreground hover:bg-accent active:scale-95 transition-all duration-150"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    Retry
+                  </button>
+                </>
+              )}
+            </div>
+          </SettingRow>
+
+          {/* Release channel — placeholder for future use */}
+          <SettingRow
+            label="Release Channel"
+            description="Stable receives tested releases. Beta gets early access to new features."
+          >
+            <div className="relative">
+              <select
+                defaultValue="stable"
+                className="h-8 pl-3 pr-8 text-sm bg-secondary border border-border rounded-md text-foreground focus:outline-none focus:ring-1 focus:ring-ring appearance-none cursor-pointer"
+              >
+                <option value="stable">Stable</option>
+                <option value="beta">Beta</option>
+              </select>
+              <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-muted-foreground pointer-events-none" />
             </div>
           </SettingRow>
         </Section>

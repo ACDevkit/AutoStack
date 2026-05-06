@@ -14,6 +14,7 @@ import { getFrameworkById } from "@/lib/frameworks";
 import { FrameworkIcon } from "@/components/FrameworkSelect";
 import { installProject, type InstallOutput } from "@/lib/installer";
 import { processManager, type RunPhase } from "@/lib/processManager";
+import { invoke } from "@tauri-apps/api/core";
 
 // ─── Status helpers ────────────────────────────────────────────────────────────
 
@@ -112,34 +113,42 @@ export default function ProjectPage({ project, isActive }: ProjectPageProps) {
     () => processManager.getPhase(project.id),
   );
 
-  // ── Subscribe to phase changes from the global processManager ────────────────
-  // When the process exits naturally (crash or normal exit) while the tab is
-  // closed, the manager fires this listener so the badge / buttons update as
-  // soon as the tab is re-opened.
+  // ── Subscribe to phase changes ───────────────────────────────────────────────
   useEffect(() => {
-    // Sync the initial phase on every mount (covers re-opens where the process
-    // changed state while the tab was hidden / unmounted).
     setRunPhase(processManager.getPhase(project.id));
 
     const unsub = processManager.subscribePhase(project.id, (phase) => {
       setRunPhase(phase);
-      // Write the shell prompt after the process finishes
+      // Write a shell prompt decoration after the process finishes so the user
+      // has a clear visual boundary between server output and the next prompt.
       if (phase === "stopped" || phase === "error") {
         termRef.current?.writeln("");
-        termRef.current?.write("\x1b[38;5;63m❯\x1b[0m ");
       }
     });
 
     return unsub;
   }, [project.id]);
 
-  // ── Terminal init (per project id) ───────────────────────────────────────────
-  // Each time the component mounts (or project.id changes) we create a fresh
-  // xterm instance.  If there is buffered output from a previous run the
-  // buffer is replayed so the user can see historical process output.
+  // ── Terminal init ────────────────────────────────────────────────────────────
+  //
+  // This effect runs once per project tab open.  It:
+  //   1. Creates the xterm.js instance and writes the project banner.
+  //   2. Registers processManager's in-memory output subscription so live
+  //      shell output appears in the terminal as it arrives.
+  //   3. Wires `term.onData` → `invoke("write_shell_input")` so every
+  //      keystroke (including Ctrl+C) is forwarded to the PTY shell.
+  //   4. Calls `processManager.attachShell` to register Tauri event listeners
+  //      for `shell_output_{id}` / `shell_exit_{id}`.
+  //   5. Calls `invoke("open_shell")` to start (or resize) the PTY shell.
+  //   6. Sets up a ResizeObserver that fits the terminal and notifies the PTY
+  //      of the new dimensions so line-wrapping and cursor stay correct.
+  //
+  // Cleanup: detaches processManager listeners, closes the PTY shell, disposes
+  // the xterm instance.
   useEffect(() => {
     if (!termContainerRef.current) return;
 
+    // ── 1. Create xterm instance ─────────────────────────────────────────────
     const term = new Terminal({
       cursorBlink:       true,
       cursorStyle:       "block",
@@ -147,7 +156,7 @@ export default function ProjectPage({ project, isActive }: ProjectPageProps) {
       fontSize:          13,
       lineHeight:        1.5,
       letterSpacing:     0,
-      scrollback:        10000,
+      scrollback:        10_000,
       theme:             TERM_THEME,
       allowTransparency: false,
       convertEol:        true,
@@ -163,17 +172,7 @@ export default function ProjectPage({ project, isActive }: ProjectPageProps) {
     termRef.current = term;
     fitRef.current  = fit;
 
-    // Helper that writes a single buffered / streamed line into this terminal
-    function writeLine(line: string, kind: string) {
-      switch (kind) {
-        case "info":    term.writeln(`\x1b[38;5;245m${line}\x1b[0m`); break;
-        case "err":     term.writeln(`\x1b[33m${line}\x1b[0m`);       break;
-        case "success": term.writeln(`\x1b[32m${line}\x1b[0m`);       break;
-        default:        term.writeln(line);
-      }
-    }
-
-    // Welcome banner
+    // ── Write banner ─────────────────────────────────────────────────────────
     const fw      = getFrameworkById(project.templateId);
     const fwLabel = fw ? fw.name : project.templateId || "Unknown";
 
@@ -187,103 +186,139 @@ export default function ProjectPage({ project, isActive }: ProjectPageProps) {
     term.writeln(`\x1b[38;5;245m  Framework  \x1b[0m\x1b[97m${fwLabel}\x1b[0m`);
     if (project.path) {
       term.writeln(`\x1b[38;5;245m  Path       \x1b[0m\x1b[38;5;110m${project.path}\x1b[0m`);
+      term.writeln("");
+      term.writeln("\x1b[38;5;245m  Click \x1b[1mStart\x1b[0m\x1b[38;5;245m above to run the dev server, or type commands below.\x1b[0m");
     } else {
       term.writeln(
         `\x1b[38;5;245m  Path       \x1b[0m\x1b[33mnot set — click \x1b[1mInstall Project\x1b[0m\x1b[33m above to scaffold\x1b[0m`,
       );
+      term.writeln("");
+      term.writeln("\x1b[38;5;245m  A shell will open below once the project is installed.\x1b[0m");
     }
     term.writeln("");
 
-    // Replay historical output if the process was already run before this
-    // component mounted (e.g. the user closed and re-opened the tab).
-    const buffer       = processManager.getOutputBuffer(project.id);
-    const currentPhase = processManager.getPhase(project.id);
-
-    if (buffer.length > 0) {
-      term.writeln("\x1b[38;5;63m  ── Reconnected ─────────────────────────────────\x1b[0m");
-      term.writeln("");
-      for (const item of buffer) {
-        writeLine(item.line, item.kind);
+    // ── Helper: write a single output line ───────────────────────────────────
+    // kind="raw" → verbatim PTY chunk (may contain ANSI + \r progress rewinds)
+    // Other kinds → coloured text for install/status messages
+    function writeLine(line: string, kind: string) {
+      switch (kind) {
+        case "raw":     term.write(line);                              break;
+        case "info":    term.writeln(`\x1b[38;5;245m${line}\x1b[0m`); break;
+        case "err":     term.writeln(`\x1b[33m${line}\x1b[0m`);       break;
+        case "success": term.writeln(`\x1b[32m${line}\x1b[0m`);       break;
+        default:        term.writeln(line);
       }
-      // Show the prompt only when the process is not still running
-      if (currentPhase !== "running" && currentPhase !== "starting") {
-        term.writeln("");
-        term.write("\x1b[38;5;63m❯\x1b[0m ");
-      }
-    } else {
-      // Fresh session — show the standard hint and shell prompt
-      if (project.path) {
-        term.writeln("\x1b[38;5;245m  Click \x1b[1mStart\x1b[0m\x1b[38;5;245m above to run the dev server.\x1b[0m");
-      } else {
-        term.writeln("\x1b[38;5;245m  Shell integration coming soon.\x1b[0m");
-      }
-      term.writeln("");
-      term.write("\x1b[38;5;63m❯\x1b[0m ");
     }
 
-    // Basic line editing (while no real shell is connected)
-    let line = "";
-    term.onData((data) => {
-      switch (data) {
-        case "\r": {
-          term.writeln("");
-          if (line.trim()) {
-            term.writeln(
-              `\x1b[38;5;245m  (shell not connected — \x1b[0m\x1b[97m${line.trim()}\x1b[38;5;245m)\x1b[0m`,
-            );
-            term.writeln("");
-          }
-          line = "";
-          term.write("\x1b[38;5;63m❯\x1b[0m ");
-          break;
-        }
-        case "\u007F": {
-          if (line.length > 0) { line = line.slice(0, -1); term.write("\b \b"); }
-          break;
-        }
-        case "\u0003": {
-          term.writeln("^C"); line = ""; term.write("\x1b[38;5;63m❯\x1b[0m ");
-          break;
-        }
-        default: {
-          if (data >= " " || data === "\t") { line += data; term.write(data); }
-        }
-      }
-    });
-
-    // Subscribe to live output from the global processManager.
-    // This listener is removed when the terminal is destroyed (on unmount),
-    // but the processManager continues buffering output so it can be replayed.
+    // ── 2. Subscribe to processManager output ────────────────────────────────
+    // (In-memory only — this drives live terminal rendering.  The actual Tauri
+    // event listener is registered by attachShell below.)
     const unsubOutput = processManager.subscribeOutput(project.id, (output) => {
       writeLine(output.line, output.kind);
     });
 
-    const ro = new ResizeObserver(() => { try { fit.fit(); } catch { /* noop */ } });
+    // ── 3. Wire keyboard input to PTY ────────────────────────────────────────
+    // Every character, control sequence, and special key (arrows, Ctrl+C, Tab,
+    // etc.) that xterm.js produces is forwarded verbatim to the shell via
+    // write_shell_input.  The PTY delivers it to the foreground process.
+    term.onData((data) => {
+      invoke("write_shell_input", { projectId: project.id, data }).catch(() => {});
+    });
+
+    // ── 4 & 5. Async shell setup ─────────────────────────────────────────────
+    // attachShell registers the Tauri event listeners; open_shell starts
+    // (or resizes) the PTY process.  Both must complete before shell output
+    // or exit events can be processed.
+    let isMounted = true;
+    let detachShell: (() => void) | null = null;
+
+    const initShell = async () => {
+      // Register listeners FIRST so no early output is missed.
+      detachShell = await processManager.attachShell(project.id);
+      if (!isMounted) {
+        detachShell();
+        detachShell = null;
+        return;
+      }
+
+      // Derive initial PTY size from the current terminal dimensions.
+      const dim  = fit.proposeDimensions() ?? { cols: 80, rows: 24 };
+      const cols = Math.max(dim.cols, 20);
+      const rows = Math.max(dim.rows, 5);
+
+      await invoke("open_shell", {
+        projectId:   project.id,
+        projectPath: project.path ?? "",
+        cols,
+        rows,
+      }).catch((err: unknown) => {
+        term.writeln(`\x1b[31m  Shell error: ${String(err)}\x1b[0m`);
+      });
+    };
+
+    initShell().catch(console.error);
+
+    // ── 6. Resize observer ───────────────────────────────────────────────────
+    // Tracks the terminal container size, fits xterm.js, and tells the PTY
+    // about the new dimensions so column wrap / cursor positioning stays right.
+    let lastCols = 0;
+    let lastRows = 0;
+
+    const ro = new ResizeObserver(() => {
+      try { fit.fit(); } catch { /* noop */ }
+      const dim = fit.proposeDimensions();
+      if (dim && (dim.cols !== lastCols || dim.rows !== lastRows)) {
+        lastCols = dim.cols;
+        lastRows = dim.rows;
+        invoke("resize_shell", {
+          projectId: project.id,
+          cols: dim.cols,
+          rows: dim.rows,
+        }).catch(() => {});
+      }
+    });
     ro.observe(termContainerRef.current!);
 
+    // ── Cleanup ──────────────────────────────────────────────────────────────
     return () => {
+      isMounted = false;
+      detachShell?.();
       unsubOutput();
       ro.disconnect();
       term.dispose();
       termRef.current = null;
       fitRef.current  = null;
+      // Close the PTY shell so it doesn't linger after the tab is closed.
+      invoke("close_shell", { projectId: project.id }).catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.id]);
 
-  // Re-fit when tab becomes visible
+  // Re-fit + re-notify PTY when tab becomes visible ─────────────────────────
   useEffect(() => {
-    if (isActive && fitRef.current) {
-      requestAnimationFrame(() => { try { fitRef.current?.fit(); } catch { /* noop */ } });
-    }
-  }, [isActive]);
+    if (!isActive || !fitRef.current) return;
+    requestAnimationFrame(() => {
+      try {
+        fitRef.current?.fit();
+        const dim = fitRef.current?.proposeDimensions();
+        if (dim) {
+          invoke("resize_shell", {
+            projectId: project.id,
+            cols: dim.cols,
+            rows: dim.rows,
+          }).catch(() => {});
+        }
+      } catch { /* noop */ }
+    });
+  }, [isActive, project.id]);
 
-  // ── Terminal write helpers ───────────────────────────────────────────────────
+  // ── Terminal write helpers (used by install + start/stop handlers) ────────
 
   function writeToTerm(line: string, kind: string) {
     const term = termRef.current;
     if (!term) return;
     switch (kind) {
+      case "raw":     term.write(line);                              break;
       case "info":    term.writeln(`\x1b[38;5;245m${line}\x1b[0m`); break;
       case "err":     term.writeln(`\x1b[33m${line}\x1b[0m`);       break;
       case "success": term.writeln(`\x1b[32m${line}\x1b[0m`);       break;
@@ -320,7 +355,14 @@ export default function ProjectPage({ project, isActive }: ProjectPageProps) {
       updateProject(project.id, { path: installedPath });
       setInstallPhase("idle");
       termRef.current?.writeln("");
-      termRef.current?.write("\x1b[38;5;63m❯\x1b[0m ");
+      // Re-open the shell in the newly created project directory.
+      const dim  = fitRef.current?.proposeDimensions() ?? { cols: 80, rows: 24 };
+      await invoke("open_shell", {
+        projectId:   project.id,
+        projectPath: installedPath,
+        cols: Math.max(dim.cols, 20),
+        rows: Math.max(dim.rows, 5),
+      }).catch(() => {});
     } catch (err) {
       const msg = String(err);
       setInstallError(msg);
@@ -329,15 +371,12 @@ export default function ProjectPage({ project, isActive }: ProjectPageProps) {
       writeToTerm(`  ✗ Installation failed`, "err");
       writeToTerm(`  ${msg}`, "info");
       termRef.current?.writeln("");
-      termRef.current?.write("\x1b[38;5;63m❯\x1b[0m ");
     }
   }
 
   // ── Start handler ────────────────────────────────────────────────────────────
 
   async function handleStart() {
-    // Use processManager.getPhase (synchronous) to avoid double-click races
-    // where React state might not have updated yet.
     const current = processManager.getPhase(project.id);
     if (current === "starting" || current === "running") return;
 
@@ -346,12 +385,10 @@ export default function ProjectPage({ project, isActive }: ProjectPageProps) {
 
     try {
       await processManager.start(project.id, project.templateId, project.path);
-      // runPhase is updated via the subscribePhase subscription above
     } catch (err) {
       writeToTerm("", "info");
       writeToTerm(`  ✗ Failed to start: ${String(err)}`, "err");
       termRef.current?.writeln("");
-      termRef.current?.write("\x1b[38;5;63m❯\x1b[0m ");
     }
   }
 
@@ -360,16 +397,14 @@ export default function ProjectPage({ project, isActive }: ProjectPageProps) {
   async function handleStop() {
     const current = processManager.getPhase(project.id);
     if (current !== "running" && current !== "starting") return;
-
     try {
       await processManager.stop(project.id);
-      // runPhase and terminal output updated via subscriptions
     } catch {
-      // ignore — processManager already handles errors internally
+      // processManager handles errors internally
     }
   }
 
-  // ── Derived ──────────────────────────────────────────────────────────────────
+  // ── Derived state ─────────────────────────────────────────────────────────────
 
   const baseStatus = deriveStatus(project);
   const isNotSetup = baseStatus === "not-setup";
@@ -426,10 +461,10 @@ export default function ProjectPage({ project, isActive }: ProjectPageProps) {
         {/* ── Status + action group ───────────────────────────────────── */}
         <div className="flex items-center gap-2 shrink-0">
 
-          {/* Status badge — reflects global run state */}
+          {/* Status badge */}
           <StatusBadge status={displayStatus} />
 
-          {/* ── INSTALL flow (project has no path yet) ─────────────────── */}
+          {/* ── INSTALL flow ────────────────────────────────────────────── */}
           {isNotSetup && installPhase === "idle" && (
             <button
               onClick={handleInstall}
@@ -456,7 +491,7 @@ export default function ProjectPage({ project, isActive }: ProjectPageProps) {
             </button>
           )}
 
-          {/* ── RUN flow (project is set up) ───────────────────────────── */}
+          {/* ── RUN flow ────────────────────────────────────────────────── */}
           {!isNotSetup && runPhase === "stopped" && (
             <button
               onClick={handleStart}
@@ -495,13 +530,22 @@ export default function ProjectPage({ project, isActive }: ProjectPageProps) {
         {/* Divider */}
         <div className="w-px h-5 bg-border/60 shrink-0" />
 
-        {/* Path */}
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0 max-w-xs shrink-0">
-          <FolderOpen className="w-3.5 h-3.5 shrink-0" />
-          <span className="truncate" title={project.path || "No path set"}>
-            {project.path || "No path set"}
-          </span>
-        </div>
+        {/* Path — clickable when set */}
+        {project.path ? (
+          <button
+            onClick={() => invoke("open_folder", { path: project.path }).catch(() => {})}
+            title={`Open in file explorer\n${project.path}`}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0 max-w-xs shrink-0 rounded px-1 -mx-1 hover:text-foreground hover:bg-secondary/60 active:bg-secondary transition-colors duration-100 cursor-pointer"
+          >
+            <FolderOpen className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">{project.path}</span>
+          </button>
+        ) : (
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0 max-w-xs shrink-0">
+            <FolderOpen className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">No path set</span>
+          </div>
+        )}
       </div>
 
       {/* ── Terminal ────────────────────────────────────────────────────── */}

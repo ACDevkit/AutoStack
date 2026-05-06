@@ -7,35 +7,67 @@ export type RunPhase = "stopped" | "starting" | "running" | "error";
 
 export interface OutputLine {
   line: string;
-  kind: string;
+  kind: string; // "raw" | "info" | "err" | "success" | "out"
 }
 
 type PhaseListener  = (phase: RunPhase) => void;
 type OutputListener = (output: OutputLine) => void;
+
+// ─── Startup detection patterns ───────────────────────────────────────────────
+// Matched against incoming shell output while phase === "starting".
+// A match transitions the project to "running".
+
+const RUNNING_PATTERNS: RegExp[] = [
+  /localhost:\d+/i,                             // Vite, Node, most servers
+  /127\.0\.0\.1:\d+/i,
+  /0\.0\.0\.0:\d+/i,
+  /\bLocal:\s+http/i,                           // Vite "Local: http://..."
+  /ready in \d+/i,                              // Vite "ready in Xms"
+  /running on http/i,                           // Flask, FastAPI
+  /uvicorn running/i,                           // FastAPI/uvicorn
+  /starting development server/i,               // Django
+  /application bundle generation complete/i,    // Angular
+  /ready\s*[-–]\s*started server/i,             // Next.js 12
+  /✓\s+ready/i,                                 // Next.js 13+
+  /now listening on/i,                          // .NET
+  /listening on http/i,                         // Go, Rust/Axum
+  /development server started/i,               // Laravel
+  /server running at/i,                        // Node.js http server
+];
 
 // ─── Per-project state ────────────────────────────────────────────────────────
 
 interface ProjectState {
   phase:           RunPhase;
   outputBuffer:    OutputLine[];
-  /** Set to true while stop() is in flight so the exit-event handler ignores the race. */
   intentionalStop: boolean;
+  /** True once shell Tauri event listeners have been registered. */
+  shellAttached:   boolean;
   unlistenOut?:    () => void;
   unlistenExit?:   () => void;
   phaseListeners:  Set<PhaseListener>;
   outputListeners: Set<OutputListener>;
 }
 
-/** Maximum lines kept in the output buffer (matches terminal scrollback). */
+/** Maximum lines kept in the rolling output buffer. */
 const MAX_BUFFER = 5_000;
 
 // ─── ProcessManager ───────────────────────────────────────────────────────────
 
 /**
- * Global singleton that manages running dev-server processes across the
- * entire app lifetime.  Components subscribe to it for phase / output updates
- * and unsubscribe when they unmount — but the process and its Tauri listeners
- * stay alive until the user explicitly stops the project.
+ * Global singleton that owns all shell event subscriptions and output buffers.
+ *
+ * Lifecycle per project tab:
+ *   1. Component mounts  → ProjectPage calls `attachShell(id)` which registers
+ *      Tauri event listeners for `shell_output_{id}` and `shell_exit_{id}`.
+ *      Returns a cleanup function that MUST be called on unmount.
+ *   2. User clicks Start → `start()` writes the dev-server command to the PTY
+ *      via `invoke("start_project")`.  Output scanning detects startup patterns
+ *      and transitions phase to "running".  A fallback timer fires after 8 s.
+ *   3. User clicks Stop  → `stop()` sends Ctrl+C via `invoke("stop_project")`.
+ *      Phase transitions to "stopped" immediately.
+ *   4. Component unmounts → cleanup function tears down listeners.
+ *      The PTY shell itself is closed by ProjectPage via `invoke("close_shell")`.
  */
 class ProcessManager {
   private projects = new Map<string, ProjectState>();
@@ -48,6 +80,7 @@ class ProcessManager {
         phase:           "stopped",
         outputBuffer:    [],
         intentionalStop: false,
+        shellAttached:   false,
         phaseListeners:  new Set(),
         outputListeners: new Set(),
       });
@@ -64,17 +97,16 @@ class ProcessManager {
   private pushOutput(id: string, output: OutputLine) {
     const state = this.ensure(id);
     state.outputBuffer.push(output);
-    if (state.outputBuffer.length > MAX_BUFFER) {
-      state.outputBuffer.shift();
-    }
+    if (state.outputBuffer.length > MAX_BUFFER) state.outputBuffer.shift();
     for (const cb of state.outputListeners) cb(output);
   }
 
   private teardownListeners(state: ProjectState) {
     state.unlistenOut?.();
     state.unlistenExit?.();
-    state.unlistenOut  = undefined;
-    state.unlistenExit = undefined;
+    state.unlistenOut   = undefined;
+    state.unlistenExit  = undefined;
+    state.shellAttached = false;
   }
 
   // ── Public reads ───────────────────────────────────────────────────────────
@@ -89,104 +121,127 @@ class ProcessManager {
 
   // ── Subscriptions ──────────────────────────────────────────────────────────
 
-  /**
-   * Subscribe to run-phase changes for a project.
-   * Returns a cleanup function — call it on component unmount.
-   */
   subscribePhase(id: string, listener: PhaseListener): () => void {
     const state = this.ensure(id);
     state.phaseListeners.add(listener);
     return () => state.phaseListeners.delete(listener);
   }
 
-  /**
-   * Subscribe to new output lines for a project.
-   * Returns a cleanup function — call it on component unmount.
-   * The subscription is UI-only; removing it does NOT stop buffering.
-   */
   subscribeOutput(id: string, listener: OutputListener): () => void {
     const state = this.ensure(id);
     state.outputListeners.add(listener);
     return () => state.outputListeners.delete(listener);
   }
 
-  // ── Process lifecycle ──────────────────────────────────────────────────────
+  // ── Shell attachment ───────────────────────────────────────────────────────
 
   /**
-   * Spawn the dev server for a project.  Registers Tauri event listeners
-   * BEFORE invoking Rust to avoid any race condition.  The listeners and the
-   * output buffer survive component unmounts — they live until stop() is
-   * called or the process exits on its own.
+   * Register Tauri event listeners for a project's PTY shell.
+   * Should be called once when the project tab mounts (after the terminal is
+   * created).  The returned function MUST be called on unmount.
+   *
+   * Idempotent: if listeners are already registered this is a no-op.
    */
-  async start(id: string, frameworkId: string, projectPath: string): Promise<void> {
+  async attachShell(id: string): Promise<() => void> {
     const state = this.ensure(id);
 
-    // Tear down any listeners from a previous run
-    this.teardownListeners(state);
-    state.outputBuffer   = [];
-    state.intentionalStop = false;
+    // Already attached — return a no-op cleanup to avoid double-subscribing.
+    if (state.shellAttached) {
+      return () => {};
+    }
 
-    this.setPhase(id, "starting");
+    const outEvent  = `shell_output_${id}`;
+    const exitEvent = `shell_exit_${id}`;
 
-    const outEvent  = `process_output_${id}`;
-    const exitEvent = `process_exit_${id}`;
-
-    // Register listeners BEFORE invoking Rust to avoid race conditions
     state.unlistenOut = await listen<OutputLine>(outEvent, (e) => {
       this.pushOutput(id, e.payload);
+
+      // While the dev server is starting, scan for known startup patterns.
+      const curState = this.projects.get(id);
+      if (curState?.phase === "starting") {
+        if (RUNNING_PATTERNS.some((p) => p.test(e.payload.line))) {
+          this.setPhase(id, "running");
+        }
+      }
     });
 
-    state.unlistenExit = await listen<number | null>(exitEvent, (e) => {
-      // Ignore if stop() already handled this (intentional kill)
-      if (state.intentionalStop) return;
-
-      const code = e.payload;
-      this.teardownListeners(state);
-
-      if (code !== 0 && code !== null) {
-        this.pushOutput(id, { line: "", kind: "info" });
-        this.pushOutput(id, { line: `  ✗ Process exited with code ${code}`, kind: "err" });
-        this.setPhase(id, "error");
-      } else {
-        this.pushOutput(id, { line: "", kind: "info" });
-        this.pushOutput(id, { line: "  Process stopped", kind: "info" });
+    state.unlistenExit = await listen<void>(exitEvent, () => {
+      const st = this.projects.get(id);
+      if (!st) return;
+      this.teardownListeners(st);
+      // Only update phase on unexpected exit (not after an intentional stop).
+      if (!st.intentionalStop) {
         this.setPhase(id, "stopped");
       }
     });
 
+    state.shellAttached = true;
+
+    return () => {
+      const st = this.projects.get(id);
+      if (st) this.teardownListeners(st);
+    };
+  }
+
+  // ── Process lifecycle ──────────────────────────────────────────────────────
+
+  /**
+   * Start the dev server.
+   *
+   * Invokes `start_project` which writes `cd <path> && <cmd>` to the project's
+   * PTY shell stdin.  The output arrives through the `shell_output_{id}` stream
+   * that `attachShell` is already subscribed to — no new listeners are needed.
+   *
+   * Phase transitions:
+   *   "stopped" → "starting" immediately.
+   *   "starting" → "running" when a startup URL/pattern is detected in output.
+   *   "starting" → "running" after 8 s fallback (covers frameworks where the
+   *   startup message doesn't match our patterns).
+   */
+  async start(id: string, frameworkId: string, projectPath: string): Promise<void> {
+    const state = this.ensure(id);
+    state.intentionalStop = false;
+    this.setPhase(id, "starting");
+
     try {
-      await invoke<void>("start_project", { projectId: id, frameworkId, projectPath });
-      this.setPhase(id, "running");
+      await invoke<void>("start_project", {
+        projectId:   id,
+        frameworkId,
+        projectPath,
+      });
+
+      // Fallback timer: if no startup pattern is detected within 8 s, assume
+      // the server is running (avoids getting stuck in "starting" forever).
+      const targetId = id;
+      setTimeout(() => {
+        const p = this.projects.get(targetId);
+        if (p?.phase === "starting") this.setPhase(targetId, "running");
+      }, 8_000);
     } catch (err) {
-      this.teardownListeners(state);
       this.setPhase(id, "error");
       throw err;
     }
   }
 
   /**
-   * Kill the dev server for a project.  Sets intentionalStop so the exit-
-   * event handler (which fires asynchronously from Rust) is a no-op.
+   * Stop the dev server by sending Ctrl+C to the PTY.
+   * The PTY delivers SIGINT to the foreground process group exactly as a real
+   * Ctrl+C press would.  Phase transitions to "stopped" immediately.
    */
   async stop(id: string): Promise<void> {
     const state = this.ensure(id);
 
-    // Guard: mark as intentional before the async kill so the exit listener
-    // ignores the race-condition event that Rust always emits on kill.
     state.intentionalStop = true;
-
     this.pushOutput(id, { line: "", kind: "info" });
     this.pushOutput(id, { line: "  Stopping\u2026", kind: "info" });
 
     try {
       await invoke<void>("stop_project", { projectId: id });
     } catch {
-      // ignore — process may have already exited
+      // Ignore — process may have already exited.
     }
 
-    this.teardownListeners(state);
     state.intentionalStop = false;
-
     this.pushOutput(id, { line: "  Stopped.", kind: "info" });
     this.setPhase(id, "stopped");
   }
