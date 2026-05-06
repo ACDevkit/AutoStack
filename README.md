@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🏗️ AutoStack
+# AutoStack
 
 *Work in progress, this is the very early development.*
 
