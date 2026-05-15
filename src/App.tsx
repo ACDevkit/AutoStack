@@ -8,6 +8,7 @@ import SettingsPage from "@/components/SettingsPage";
 import ProjectPage from "@/components/ProjectPage";
 
 export type TabId = string;
+export type ProjectTabView = "console" | "settings";
 
 // ─── Ghost card skeleton ───────────────────────────────────────────────────────
 
@@ -39,6 +40,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>("dashboard");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [openProjectTabIds, setOpenProjectTabIds] = useState<string[]>([]);
+  const [projectTabViews, setProjectTabViews] = useState<Record<string, ProjectTabView>>({});
 
   // Keep activeTab ref in sync for use inside effects without re-triggering them
   const activeTabRef = useRef(activeTab);
@@ -50,6 +52,11 @@ export default function App() {
     setOpenProjectTabIds((prev) => {
       const next = prev.filter((id) => ids.has(id));
       return next.length !== prev.length ? next : prev;
+    });
+    setProjectTabViews((prev) => {
+      const nextEntries = Object.entries(prev).filter(([id]) => ids.has(id));
+      if (nextEntries.length === Object.keys(prev).length) return prev;
+      return Object.fromEntries(nextEntries);
     });
     if (
       activeTabRef.current.startsWith("project-") &&
@@ -63,18 +70,33 @@ export default function App() {
 
   // ── Tab helpers ──────────────────────────────────────────────────────────────
 
-  function openProjectTab(projectId: string) {
+  function openProjectTab(projectId: string, initialView: ProjectTabView = "console") {
     setOpenProjectTabIds((prev) =>
       prev.includes(projectId) ? prev : [...prev, projectId],
     );
+    setProjectTabViews((prev) => ({ ...prev, [projectId]: initialView }));
     setActiveTab(`project-${projectId}`);
   }
 
   function closeProjectTab(projectId: string) {
     setOpenProjectTabIds((prev) => prev.filter((id) => id !== projectId));
+    setProjectTabViews((prev) => {
+      if (!(projectId in prev)) return prev;
+      const next = { ...prev };
+      delete next[projectId];
+      return next;
+    });
     setActiveTab((prev) =>
       prev === `project-${projectId}` ? "dashboard" : prev,
     );
+  }
+
+  function openProjectSettingsTab(projectId: string) {
+    openProjectTab(projectId, "settings");
+  }
+
+  function setProjectTabView(projectId: string, view: ProjectTabView) {
+    setProjectTabViews((prev) => ({ ...prev, [projectId]: view }));
   }
 
   function openSettings() {
@@ -134,12 +156,18 @@ export default function App() {
           const project = projects.find((p) => p.id === projectId);
           if (!project) return null;
           const active = activeTab === `project-${projectId}`;
+          const viewMode = projectTabViews[projectId] ?? "console";
           return (
             <div
               key={projectId}
               className={active ? "flex flex-col flex-1 min-h-0" : "hidden"}
             >
-              <ProjectPage project={project} isActive={active} />
+              <ProjectPage
+                project={project}
+                isActive={active}
+                viewMode={viewMode}
+                onViewModeChange={(view) => setProjectTabView(projectId, view)}
+              />
             </div>
           );
         })}
@@ -165,6 +193,7 @@ export default function App() {
                   key={project.id}
                   project={project}
                   onOpen={() => openProjectTab(project.id)}
+                  onOpenSettings={() => openProjectSettingsTab(project.id)}
                 />
               ))}
 

@@ -60,9 +60,10 @@ function StatusBadge({ status }: { status: ProjectStatus }) {
 interface ProjectCardProps {
   project: Project;
   onOpen?: () => void;
+  onOpenSettings?: () => void;
 }
 
-export default function ProjectCard({ project, onOpen }: ProjectCardProps) {
+export default function ProjectCard({ project, onOpen, onOpenSettings }: ProjectCardProps) {
   const removeProject = useProjectStore((s) => s.removeProject);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -100,6 +101,12 @@ export default function ProjectCard({ project, onOpen }: ProjectCardProps) {
     removeProject(project.id);
   }
 
+  function handleOpenSettings(e: React.MouseEvent) {
+    e.stopPropagation();
+    setMenuOpen(false);
+    onOpenSettings?.();
+  }
+
   function handleCardClick(e: React.MouseEvent) {
     // Don't open if the menu or its descendants were clicked
     if (menuRef.current?.contains(e.target as Node)) return;
@@ -133,7 +140,7 @@ export default function ProjectCard({ project, onOpen }: ProjectCardProps) {
           {menuOpen && (
             <div className="absolute right-0 top-full mt-1 z-30 w-36 bg-popover border border-border rounded-lg shadow-xl shadow-black/20 overflow-hidden py-1">
               <button
-                onClick={(e) => { e.stopPropagation(); setMenuOpen(false); }}
+                onClick={handleOpenSettings}
                 className="w-full flex items-center gap-2 px-3 py-2 text-xs text-foreground/80 hover:text-foreground hover:bg-accent transition-colors"
               >
                 <Settings className="w-3.5 h-3.5 text-muted-foreground" />

@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import type { DockerRuntimeConfig } from "@/types";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -33,6 +34,14 @@ const RUNNING_PATTERNS: RegExp[] = [
   /listening on http/i,                         // Go, Rust/Axum
   /development server started/i,               // Laravel
   /server running at/i,                        // Node.js http server
+];
+
+const ERROR_PATTERNS: RegExp[] = [
+  /failed to connect to the docker api/i,
+  /docker engine is not running/i,
+  /unable to get image/i,
+  /cannot connect to the docker daemon/i,
+  /the system cannot find the file specified/i,
 ];
 
 // ─── Per-project state ────────────────────────────────────────────────────────
@@ -158,6 +167,12 @@ class ProcessManager {
 
       // While the dev server is starting, scan for known startup patterns.
       const curState = this.projects.get(id);
+      if (curState?.phase === "starting" || curState?.phase === "running") {
+        if (ERROR_PATTERNS.some((p) => p.test(e.payload.line))) {
+          this.setPhase(id, "error");
+          return;
+        }
+      }
       if (curState?.phase === "starting") {
         if (RUNNING_PATTERNS.some((p) => p.test(e.payload.line))) {
           this.setPhase(id, "running");
@@ -198,7 +213,12 @@ class ProcessManager {
    *   "starting" → "running" after 8 s fallback (covers frameworks where the
    *   startup message doesn't match our patterns).
    */
-  async start(id: string, frameworkId: string, projectPath: string): Promise<void> {
+  async start(
+    id: string,
+    frameworkId: string,
+    projectPath: string,
+    dockerConfig?: DockerRuntimeConfig,
+  ): Promise<void> {
     const state = this.ensure(id);
     state.intentionalStop = false;
     this.setPhase(id, "starting");
@@ -208,6 +228,7 @@ class ProcessManager {
         projectId:   id,
         frameworkId,
         projectPath,
+        dockerConfig: dockerConfig ?? null,
       });
 
       // Fallback timer: if no startup pattern is detected within 8 s, assume
@@ -228,7 +249,7 @@ class ProcessManager {
    * The PTY delivers SIGINT to the foreground process group exactly as a real
    * Ctrl+C press would.  Phase transitions to "stopped" immediately.
    */
-  async stop(id: string): Promise<void> {
+  async stop(id: string, projectPath?: string, dockerConfig?: DockerRuntimeConfig): Promise<void> {
     const state = this.ensure(id);
 
     state.intentionalStop = true;
@@ -236,7 +257,11 @@ class ProcessManager {
     this.pushOutput(id, { line: "  Stopping\u2026", kind: "info" });
 
     try {
-      await invoke<void>("stop_project", { projectId: id });
+      await invoke<void>("stop_project", {
+        projectId: id,
+        projectPath: projectPath ?? null,
+        dockerConfig: dockerConfig ?? null,
+      });
     } catch {
       // Ignore — process may have already exited.
     }

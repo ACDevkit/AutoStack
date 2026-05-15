@@ -16,6 +16,7 @@ export default function CreateProjectModal({ onClose }: CreateProjectModalProps)
   const [description, setDescription] = useState("");
   const [framework, setFramework]     = useState("");
   const [path, setPath]               = useState("");
+  const [useDocker, setUseDocker]     = useState(true);
 
   async function browsePath() {
     const selected = await open({ directory: true, multiple: false });
@@ -32,6 +33,7 @@ export default function CreateProjectModal({ onClose }: CreateProjectModalProps)
       description: description.trim() || undefined,
       path: path.trim(),
       templateId: framework,
+      useDocker,
       createdAt: now,
       updatedAt: now,
     });
@@ -128,6 +130,16 @@ export default function CreateProjectModal({ onClose }: CreateProjectModalProps)
               </button>
             </div>
           </div>
+
+          <label className="inline-flex items-center gap-2 text-sm text-foreground">
+            <input
+              type="checkbox"
+              checked={useDocker}
+              onChange={(e) => setUseDocker(e.target.checked)}
+              className="h-4 w-4 rounded border-border bg-secondary accent-primary"
+            />
+            Run this project in Docker containers with local port forwarding
+          </label>
 
           {/* Footer */}
           <div className="flex items-center justify-end gap-2 pt-2">

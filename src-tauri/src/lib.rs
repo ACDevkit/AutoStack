@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use tauri::Emitter;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use portable_pty::{CommandBuilder, native_pty_system, PtySize};
 
 // ─── Shared event type ────────────────────────────────────────────────────────
@@ -14,6 +15,34 @@ use portable_pty::{CommandBuilder, native_pty_system, PtySize};
 struct OutputEvent {
     line: String,
     kind: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct DockerRuntimeConfig {
+    enabled: bool,
+    host_port: u16,
+    container_port: u16,
+    service_name: String,
+    compose_file: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct DockerRuntimePrepared {
+    enabled: bool,
+    host_port: u16,
+    container_port: u16,
+    service_name: String,
+    compose_file: String,
+}
+
+#[derive(Clone, Copy)]
+struct DockerProfile {
+    image: &'static str,
+    bootstrap_cmd: &'static str,
+    run_cmd: &'static str,
+    default_port: u16,
 }
 
 fn emit_line(app: &tauri::AppHandle, event: &str, kind: &str, line: &str) {
@@ -102,6 +131,224 @@ fn write_file(path: &Path, contents: &str) -> Result<(), String> {
         .map_err(|e| format!("Cannot write '{}': {e}", path.display()))
 }
 
+/// Convert arbitrary project display names into a safe scaffold directory name.
+/// This avoids generator failures caused by uppercase letters, spaces, or symbols.
+fn sanitize_project_dir_name(raw: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_dash = false;
+
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_was_dash = false;
+            continue;
+        }
+
+        if !last_was_dash {
+            out.push('-');
+            last_was_dash = true;
+        }
+    }
+
+    while out.starts_with('-') {
+        out.remove(0);
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+
+    if out.is_empty() {
+        "app".to_string()
+    } else {
+        out
+    }
+}
+
+fn ensure_unique_dir_name(base: &Path, desired: &str) -> String {
+    if !base.join(desired).exists() {
+        return desired.to_string();
+    }
+
+    let mut n: u32 = 2;
+    loop {
+        let candidate = format!("{desired}-{n}");
+        if !base.join(&candidate).exists() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+fn command_exists(command: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    let mut probe = {
+        let mut c = Command::new("cmd");
+        c.args(["/C", "where", command]);
+        c
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut probe = {
+        let mut c = Command::new("sh");
+        c.args(["-c", &format!("command -v {}", command)]);
+        c
+    };
+    probe
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn ensure_docker_available() -> Result<(), String> {
+    if !command_exists("docker") {
+        return Err(
+            "Docker CLI was not found on PATH. Install Docker Desktop (or Docker Engine) and retry."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn ensure_docker_engine_available() -> Result<(), String> {
+    ensure_docker_available()?;
+    let status = Command::new("docker")
+        .args(["info"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("Failed to run Docker CLI: {e}"))?;
+    if !status.success() {
+        return Err(
+            "Docker Engine is not running. Start Docker Desktop (or your Docker service) and try again."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn is_tcp_port_available(port: u16) -> bool {
+    TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+fn pick_host_port(preferred: u16) -> Result<u16, String> {
+    if preferred > 1024 && is_tcp_port_available(preferred) {
+        return Ok(preferred);
+    }
+    for port in preferred.saturating_add(1)..=u16::MAX {
+        if port > 1024 && is_tcp_port_available(port) {
+            return Ok(port);
+        }
+    }
+    Err("Unable to find an open local TCP port for port forwarding.".to_string())
+}
+
+fn docker_profile_for_framework(framework_id: &str) -> DockerProfile {
+    match framework_id {
+        "react" => DockerProfile {
+            image: "node:20-alpine",
+            bootstrap_cmd: "npm install",
+            run_cmd: "HOST=0.0.0.0 PORT=${AUTOSTACK_CONTAINER_PORT} npm start",
+            default_port: 3000,
+        },
+        "vite" | "vue" | "svelte" | "solid" | "astro" | "sveltekit" | "remix" => DockerProfile {
+            image: "node:20-alpine",
+            bootstrap_cmd: "npm install",
+            run_cmd: "npm run dev -- --host 0.0.0.0 --port ${AUTOSTACK_CONTAINER_PORT}",
+            default_port: 5173,
+        },
+        "nextjs" | "nuxt" => DockerProfile {
+            image: "node:20-alpine",
+            bootstrap_cmd: "npm install",
+            run_cmd: "npm run dev -- --hostname 0.0.0.0 --port ${AUTOSTACK_CONTAINER_PORT}",
+            default_port: 3000,
+        },
+        "nodejs" => DockerProfile {
+            image: "node:20-alpine",
+            bootstrap_cmd: "npm install",
+            run_cmd: "node index.js",
+            default_port: 3000,
+        },
+        "fastapi" => DockerProfile {
+            image: "python:3.12-slim",
+            bootstrap_cmd: "pip install -r requirements.txt",
+            run_cmd: "uvicorn main:app --host 0.0.0.0 --port ${AUTOSTACK_CONTAINER_PORT} --reload",
+            default_port: 8000,
+        },
+        "django" => DockerProfile {
+            image: "python:3.12-slim",
+            bootstrap_cmd: "pip install -r requirements.txt",
+            run_cmd: "python manage.py runserver 0.0.0.0:${AUTOSTACK_CONTAINER_PORT}",
+            default_port: 8000,
+        },
+        "go" => DockerProfile {
+            image: "golang:1.22-alpine",
+            bootstrap_cmd: "go mod tidy",
+            run_cmd: "go run .",
+            default_port: 8080,
+        },
+        "rust" => DockerProfile {
+            image: "rust:1.78-slim",
+            bootstrap_cmd: "cargo fetch",
+            run_cmd: "cargo run",
+            default_port: 3000,
+        },
+        "laravel" => DockerProfile {
+            image: "php:8.3-cli",
+            bootstrap_cmd: "if [ -f composer.json ]; then php -r \"copy('https://getcomposer.org/installer', 'composer-setup.php');\" && php composer-setup.php --install-dir=/usr/local/bin --filename=composer && rm composer-setup.php && composer install; fi",
+            run_cmd: "php artisan serve --host=0.0.0.0 --port=${AUTOSTACK_CONTAINER_PORT}",
+            default_port: 8000,
+        },
+        "dotnet" => DockerProfile {
+            image: "mcr.microsoft.com/dotnet/sdk:8.0",
+            bootstrap_cmd: "dotnet restore",
+            run_cmd: "dotnet run --urls=http://0.0.0.0:${AUTOSTACK_CONTAINER_PORT}",
+            default_port: 5000,
+        },
+        _ => DockerProfile {
+            image: "node:20-alpine",
+            bootstrap_cmd: "npm install",
+            run_cmd: "npm run dev -- --host 0.0.0.0 --port ${AUTOSTACK_CONTAINER_PORT}",
+            default_port: 3000,
+        },
+    }
+}
+
+fn shell_single_quote(s: &str) -> String {
+    s.replace('\'', "'\\''")
+}
+
+fn escape_compose_dollar(s: &str) -> String {
+    s.replace('$', "$$")
+}
+
+fn sanitize_service_name(project_name: &str) -> String {
+    sanitize_project_dir_name(project_name).replace('-', "_")
+}
+
+fn write_docker_compose(
+    project_path: &Path,
+    service_name: &str,
+    profile: DockerProfile,
+    host_port: u16,
+    container_port: u16,
+) -> Result<String, String> {
+    let compose_file = project_path.join("docker-compose.autostack.yml");
+    let bootstrap = shell_single_quote(profile.bootstrap_cmd);
+    let run = shell_single_quote(&escape_compose_dollar(profile.run_cmd));
+    let compose = format!(
+        "services:\n  {service}:\n    image: {image}\n    working_dir: /workspace\n    command: sh -lc '{bootstrap} && {run}'\n    environment:\n      AUTOSTACK_CONTAINER_PORT: \"{container_port}\"\n    ports:\n      - \"{host_port}:{container_port}\"\n    volumes:\n      - ./:/workspace\n",
+        service = service_name,
+        image = profile.image,
+        bootstrap = bootstrap,
+        run = run,
+        host_port = host_port,
+        container_port = container_port,
+    );
+    write_file(&compose_file, &compose)?;
+    Ok(compose_file.to_string_lossy().to_string())
+}
+
 // ─── Install: per-framework setup functions ────────────────────────────────────
 
 fn setup_vite(app: &tauri::AppHandle, event: &str, base: &Path, name: &str, template: &str) -> Result<PathBuf, String> {
@@ -111,6 +358,12 @@ fn setup_vite(app: &tauri::AppHandle, event: &str, base: &Path, name: &str, temp
     emit_line(app, event, "info", "  Installing dependencies...");
     run_command(app, event, &["npm", "install"], &dir)?;
     Ok(dir)
+}
+
+fn setup_react_default(app: &tauri::AppHandle, event: &str, base: &Path, name: &str) -> Result<PathBuf, String> {
+    emit_line(app, event, "info", "  Creating default React project...");
+    run_command(app, event, &["npx", "--yes", "create-react-app@latest", name], base)?;
+    Ok(base.join(name))
 }
 
 fn setup_angular(app: &tauri::AppHandle, event: &str, base: &Path, name: &str) -> Result<PathBuf, String> {
@@ -305,24 +558,48 @@ fn do_install(
     ));
     emit_line(&app, &event, "info", "");
 
+    // Scaffold tools can reject names with uppercase or special chars. Always
+    // normalize once and use the safe directory name for generators.
+    let sanitized_name = sanitize_project_dir_name(&project_name);
+    if sanitized_name != project_name {
+        emit_line(
+            &app,
+            &event,
+            "info",
+            &format!("  Using safe project directory name: {}", sanitized_name),
+        );
+        emit_line(&app, &event, "info", "");
+    }
+    let safe_project_name = ensure_unique_dir_name(&base, &sanitized_name);
+    if safe_project_name != sanitized_name {
+        emit_line(
+            &app,
+            &event,
+            "info",
+            &format!("  Directory already exists, using: {}", safe_project_name),
+        );
+        emit_line(&app, &event, "info", "");
+    }
+
     let project_dir = match framework_id.as_str() {
-        "react"     => setup_vite(&app, &event, &base, &project_name, "react-ts")?,
-        "vue"       => setup_vite(&app, &event, &base, &project_name, "vue-ts")?,
-        "svelte"    => setup_vite(&app, &event, &base, &project_name, "svelte-ts")?,
-        "solid"     => setup_vite(&app, &event, &base, &project_name, "solid-ts")?,
-        "angular"   => setup_angular(&app, &event, &base, &project_name)?,
-        "nextjs"    => setup_nextjs(&app, &event, &base, &project_name)?,
-        "nuxt"      => setup_nuxt(&app, &event, &base, &project_name)?,
-        "astro"     => setup_astro(&app, &event, &base, &project_name)?,
-        "sveltekit" => setup_sveltekit(&app, &event, &base, &project_name)?,
-        "remix"     => setup_remix(&app, &event, &base, &project_name)?,
-        "nodejs"    => setup_nodejs(&app, &event, &base, &project_name)?,
-        "fastapi"   => setup_fastapi(&app, &event, &base, &project_name)?,
-        "django"    => setup_django(&app, &event, &base, &project_name)?,
-        "go"        => setup_go(&app, &event, &base, &project_name)?,
-        "rust"      => setup_rust_axum(&app, &event, &base, &project_name)?,
-        "laravel"   => setup_laravel(&app, &event, &base, &project_name)?,
-        "dotnet"    => setup_dotnet(&app, &event, &base, &project_name)?,
+        "react"     => setup_react_default(&app, &event, &base, &safe_project_name)?,
+        "vite"      => setup_vite(&app, &event, &base, &safe_project_name, "react-ts")?,
+        "nextjs"    => setup_nextjs(&app, &event, &base, &safe_project_name)?,
+        "astro"     => setup_astro(&app, &event, &base, &safe_project_name)?,
+        "remix"     => setup_remix(&app, &event, &base, &safe_project_name)?,
+        "angular"   => setup_angular(&app, &event, &base, &safe_project_name)?,
+        "vue"       => setup_vite(&app, &event, &base, &safe_project_name, "vue-ts")?,
+        "svelte"    => setup_vite(&app, &event, &base, &safe_project_name, "svelte-ts")?,
+        "solid"     => setup_vite(&app, &event, &base, &safe_project_name, "solid-ts")?,
+        "nuxt"      => setup_nuxt(&app, &event, &base, &safe_project_name)?,
+        "sveltekit" => setup_sveltekit(&app, &event, &base, &safe_project_name)?,
+        "nodejs"    => setup_nodejs(&app, &event, &base, &safe_project_name)?,
+        "fastapi"   => setup_fastapi(&app, &event, &base, &safe_project_name)?,
+        "django"    => setup_django(&app, &event, &base, &safe_project_name)?,
+        "go"        => setup_go(&app, &event, &base, &safe_project_name)?,
+        "rust"      => setup_rust_axum(&app, &event, &base, &safe_project_name)?,
+        "laravel"   => setup_laravel(&app, &event, &base, &safe_project_name)?,
+        "dotnet"    => setup_dotnet(&app, &event, &base, &safe_project_name)?,
         other       => return Err(format!("Unknown framework: {}", other)),
     };
 
@@ -345,6 +622,41 @@ async fn install_project(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn prepare_docker_runtime(
+    project_path: String,
+    framework_id: String,
+    project_name: String,
+    preferred_host_port: Option<u16>,
+) -> Result<DockerRuntimePrepared, String> {
+    ensure_docker_available()?;
+    let project_dir = PathBuf::from(project_path.trim());
+    if !project_dir.exists() {
+        return Err("Project path does not exist yet. Install/create the project first.".to_string());
+    }
+
+    let profile = docker_profile_for_framework(&framework_id);
+    let container_port = profile.default_port;
+    let preferred = preferred_host_port.unwrap_or(container_port);
+    let host_port = pick_host_port(preferred)?;
+    let service_name = sanitize_service_name(&project_name);
+    let compose_file = write_docker_compose(
+        &project_dir,
+        &service_name,
+        profile,
+        host_port,
+        container_port,
+    )?;
+
+    Ok(DockerRuntimePrepared {
+        enabled: true,
+        host_port,
+        container_port,
+        service_name,
+        compose_file,
+    })
 }
 
 // ─── PTY session management ───────────────────────────────────────────────────
@@ -373,7 +685,8 @@ pub struct PtySessions(Arc<Mutex<HashMap<String, PtySessionData>>>);
 /// Returns the dev-server command for a given framework.
 fn get_start_command(framework_id: &str) -> &'static str {
     match framework_id {
-        "react" | "vue" | "svelte" | "solid"
+        "react" => "npm start",
+        "vite" | "vue" | "svelte" | "solid"
         | "nextjs" | "nuxt" | "astro" | "sveltekit" | "remix" => "npm run dev",
         "angular"  => "npm start",
         "nodejs"   => "node index.js",
@@ -384,6 +697,25 @@ fn get_start_command(framework_id: &str) -> &'static str {
         "laravel"  => "php artisan serve",
         "dotnet"   => "dotnet run",
         _          => "npm start",
+    }
+}
+
+fn build_shell_input_for_command(project_path: &str, command: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        format!(
+            "cd /d \"{}\"\r\n{}\r\n",
+            project_path.replace('"', "\"\""),
+            command,
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        format!(
+            "cd '{}' && {}\n",
+            project_path.replace('\'', "'\\''"),
+            command,
+        )
     }
 }
 
@@ -573,26 +905,27 @@ fn start_project(
     project_id: String,
     framework_id: String,
     project_path: String,
+    docker_config: Option<DockerRuntimeConfig>,
 ) -> Result<(), String> {
     use std::io::Write;
 
-    let cmd = get_start_command(&framework_id);
-
-    // Build a platform-appropriate "cd then run" command.
-    // Windows cmd.exe: cd /d "path"<CR><LF>command<CR><LF>
-    // Unix shell:      cd 'path' && command<LF>
-    #[cfg(target_os = "windows")]
-    let shell_input = format!(
-        "cd /d \"{}\"\r\n{}\r\n",
-        project_path.replace('"', "\"\""),
-        cmd,
-    );
-    #[cfg(not(target_os = "windows"))]
-    let shell_input = format!(
-        "cd '{}' && {}\n",
-        project_path.replace('\'', "'\\''"),
-        cmd,
-    );
+    let shell_input = if let Some(cfg) = docker_config {
+        if cfg.enabled {
+            ensure_docker_engine_available()?;
+            let compose_path = cfg.compose_file.replace('"', "\"\"");
+            let docker_cmd = format!(
+                "docker compose -f \"{}\" up --build --remove-orphans",
+                compose_path,
+            );
+            build_shell_input_for_command(&project_path, &docker_cmd)
+        } else {
+            let cmd = get_start_command(&framework_id);
+            build_shell_input_for_command(&project_path, cmd)
+        }
+    } else {
+        let cmd = get_start_command(&framework_id);
+        build_shell_input_for_command(&project_path, cmd)
+    };
 
     let mut map = state.0.lock().unwrap();
     match map.get_mut(&project_id) {
@@ -614,12 +947,29 @@ fn start_project(
 fn stop_project(
     state: tauri::State<'_, PtySessions>,
     project_id: String,
+    project_path: Option<String>,
+    docker_config: Option<DockerRuntimeConfig>,
 ) -> Result<(), String> {
     use std::io::Write;
     let mut map = state.0.lock().unwrap();
     if let Some(session) = map.get_mut(&project_id) {
         // \x03 = ETX = Ctrl+C
         session.writer.write_all(b"\x03").map_err(|e| e.to_string())?;
+        if let (Some(path), Some(cfg)) = (project_path, docker_config) {
+            if cfg.enabled {
+                if ensure_docker_available().is_ok() {
+                    let down_cmd = format!(
+                        "docker compose -f \"{}\" down --remove-orphans",
+                        cfg.compose_file.replace('"', "\"\""),
+                    );
+                    let down_input = build_shell_input_for_command(&path, &down_cmd);
+                    session
+                        .writer
+                        .write_all(down_input.as_bytes())
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
         session.writer.flush().map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -677,6 +1027,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             install_project,
+            prepare_docker_runtime,
             start_project,
             stop_project,
             open_folder,

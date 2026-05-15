@@ -131,7 +131,33 @@ autostack/
 
 ---
 
-### [Unreleased] — 2026-05-06  ·  Full PTY Terminal — Interactive Shell & Real Input
+### [v0.1.1] — 2026-05-15  ·  Project Settings UI + React/Vite Scaffolding Fixes
+
+**Affected files:** `src/App.tsx`, `src/components/ProjectCard.tsx`, `src/components/ProjectPage.tsx`, `src/lib/frameworks.ts`, `src/components/FrameworkSelect.tsx`, `src-tauri/src/lib.rs`
+
+#### Added project settings front-end flow (no backend wiring yet)
+
+- Added per-project view mode (`console` / `settings`) so settings can open inside a project tab.
+- Dashboard project-card dropdown **Settings** now opens/focuses that project's tab and lands on project settings.
+- Added **Project Settings** button on opened project pages and **Back to Project / Done** navigation back to console.
+- Added placeholder project settings UI (frontend-only) with sensible defaults for runtime/package manager/dev command/toggles.
+
+#### Fixed React scaffolding behavior and framework options
+
+- `react` scaffolding no longer points to Vite; it now uses default React app creation flow.
+- Added `vite` as its own explicit framework option.
+- Updated start command mapping so React uses `npm start` while Vite-based projects use `npm run dev`.
+- Refined visible framework options to the React-focused set requested (React, Vite, Next.js, Astro, Remix), while keeping backend frameworks available.
+
+#### Fixed installer naming failures (capitalization and invalid chars)
+
+- Added centralized project-name sanitization in install flow (lowercase + safe slug format).
+- Installer now auto-corrects invalid names before scaffolding instead of failing (e.g. `"React"` → `react`).
+- Added automatic unique suffixing when the target folder already exists (`name-2`, `name-3`, ...).
+
+- Switched to Docker-managed containers for projects with port forwarding.
+
+### [v0.1.0] — 2026-05-06  ·  Full PTY Terminal — Interactive Shell & Real Input
 
 **Affected files:** `src-tauri/Cargo.toml`, `src-tauri/src/lib.rs`, `src/lib/processManager.ts`, `src/components/ProjectPage.tsx`
 
@@ -304,7 +330,7 @@ After install completes and the project path is known, calls `open_shell` again 
 
 ---
 
-### [Unreleased] — 2026-05-06  ·  Settings Updates UI (Version + Check Button)
+### [v0.1.0] — 2026-05-06  ·  Settings Updates UI (Version + Check Button)
 
 **Affected file:** `src/components/SettingsPage.tsx`
 
@@ -333,7 +359,7 @@ After install completes and the project path is known, calls `open_shell` again 
 
 ---
 
-### [Unreleased] — 2026-05-06  ·  Console & Process Output Overhaul
+### [v.0.1.0] — 2026-05-06  ·  Console & Process Output Overhaul
 
 **Affected files:** `src-tauri/src/lib.rs`, `src/components/ProjectPage.tsx`
 

@@ -1,8 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { ChevronDown, Check } from "lucide-react";
 import {
-  SiReact, SiVuedotjs, SiAngular, SiSvelte, SiSolid,
-  SiNextdotjs, SiNuxt, SiAstro, SiRemix,
+  SiReact, SiVite, SiNextdotjs, SiAstro, SiRemix,
   SiNodedotjs, SiFastapi, SiDjango, SiGo, SiRust, SiLaravel, SiDotnet,
 } from "react-icons/si";
 import type { IconType } from "react-icons";
@@ -11,14 +10,9 @@ import { FRAMEWORKS, CATEGORIES, getFrameworkById, type Framework } from "@/lib/
 
 const FRAMEWORK_ICONS: Record<string, IconType> = {
   react:     SiReact,
-  vue:       SiVuedotjs,
-  angular:   SiAngular,
-  svelte:    SiSvelte,
-  solid:     SiSolid,
+  vite:      SiVite,
   nextjs:    SiNextdotjs,
-  nuxt:      SiNuxt,
   astro:     SiAstro,
-  sveltekit: SiSvelte,
   remix:     SiRemix,
   nodejs:    SiNodedotjs,
   fastapi:   SiFastapi,

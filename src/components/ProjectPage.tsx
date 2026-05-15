@@ -5,14 +5,16 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import {
   AlertCircle, Download, FolderOpen,
-  Loader2, Play, RotateCcw, Square,
+  Loader2, Play, RotateCcw, Square, Settings2, ArrowLeft,
 } from "lucide-react";
 import type { Project, ProjectStatus } from "@/types";
+import type { ProjectTabView } from "@/App";
 import { useProjectStore } from "@/stores/projectStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { getFrameworkById } from "@/lib/frameworks";
 import { FrameworkIcon } from "@/components/FrameworkSelect";
 import { installProject, type InstallOutput } from "@/lib/installer";
+import { prepareDockerRuntime } from "@/lib/docker";
 import { processManager, type RunPhase } from "@/lib/processManager";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -94,9 +96,16 @@ type InstallPhase = "idle" | "installing" | "error";
 interface ProjectPageProps {
   project: Project;
   isActive: boolean;
+  viewMode: ProjectTabView;
+  onViewModeChange: (view: ProjectTabView) => void;
 }
 
-export default function ProjectPage({ project, isActive }: ProjectPageProps) {
+export default function ProjectPage({
+  project,
+  isActive,
+  viewMode,
+  onViewModeChange,
+}: ProjectPageProps) {
   const termContainerRef = useRef<HTMLDivElement>(null);
   const termRef          = useRef<Terminal | null>(null);
   const fitRef           = useRef<FitAddon | null>(null);
@@ -107,6 +116,12 @@ export default function ProjectPage({ project, isActive }: ProjectPageProps) {
   // ── Install state ────────────────────────────────────────────────────────────
   const [installPhase, setInstallPhase] = useState<InstallPhase>("idle");
   const [installError, setInstallError] = useState<string | null>(null);
+  const [dockerError, setDockerError] = useState<string | null>(null);
+  const [runtimeVersion, setRuntimeVersion] = useState("Node 20 LTS");
+  const [packageManager, setPackageManager] = useState("npm");
+  const [startupCommand, setStartupCommand] = useState("npm run dev");
+  const [autoInstallDeps, setAutoInstallDeps] = useState(true);
+  const [enableStrictPorts, setEnableStrictPorts] = useState(false);
 
   // ── Run state — initialised from the global processManager ───────────────────
   const [runPhase, setRunPhase] = useState<RunPhase>(
@@ -296,7 +311,7 @@ export default function ProjectPage({ project, isActive }: ProjectPageProps) {
 
   // Re-fit + re-notify PTY when tab becomes visible ─────────────────────────
   useEffect(() => {
-    if (!isActive || !fitRef.current) return;
+    if (!isActive || viewMode !== "console" || !fitRef.current) return;
     requestAnimationFrame(() => {
       try {
         fitRef.current?.fit();
@@ -310,7 +325,7 @@ export default function ProjectPage({ project, isActive }: ProjectPageProps) {
         }
       } catch { /* noop */ }
     });
-  }, [isActive, project.id]);
+  }, [isActive, project.id, viewMode]);
 
   // ── Terminal write helpers (used by install + start/stop handlers) ────────
 
@@ -353,6 +368,26 @@ export default function ProjectPage({ project, isActive }: ProjectPageProps) {
         onOutput:    (o: InstallOutput) => writeToTerm(o.line, o.kind),
       });
       updateProject(project.id, { path: installedPath });
+      if (project.useDocker) {
+        try {
+          writeToTerm("  Preparing Docker runtime...", "info");
+          const docker = await prepareDockerRuntime({
+            projectPath: installedPath,
+            frameworkId: project.templateId,
+            projectName: project.name,
+          });
+          updateProject(project.id, { docker });
+          setDockerError(null);
+          writeToTerm(
+            `  Docker ready: localhost:${docker.hostPort} -> container:${docker.containerPort}`,
+            "success",
+          );
+        } catch (err) {
+          const message = String(err);
+          setDockerError(message);
+          writeToTerm(`  Docker setup failed: ${message}`, "err");
+        }
+      }
       setInstallPhase("idle");
       termRef.current?.writeln("");
       // Re-open the shell in the newly created project directory.
@@ -384,7 +419,18 @@ export default function ProjectPage({ project, isActive }: ProjectPageProps) {
     termBanner(`Starting ${fw?.name ?? project.templateId}`);
 
     try {
-      await processManager.start(project.id, project.templateId, project.path);
+      let dockerConfig = project.docker;
+      if (project.useDocker) {
+        writeToTerm("  Preparing Docker compose runtime...", "info");
+        dockerConfig = await prepareDockerRuntime({
+          projectPath: project.path,
+          frameworkId: project.templateId,
+          projectName: project.name,
+          preferredHostPort: dockerConfig?.hostPort,
+        });
+        updateProject(project.id, { docker: dockerConfig });
+      }
+      await processManager.start(project.id, project.templateId, project.path, dockerConfig);
     } catch (err) {
       writeToTerm("", "info");
       writeToTerm(`  ✗ Failed to start: ${String(err)}`, "err");
@@ -398,7 +444,7 @@ export default function ProjectPage({ project, isActive }: ProjectPageProps) {
     const current = processManager.getPhase(project.id);
     if (current !== "running" && current !== "starting") return;
     try {
-      await processManager.stop(project.id);
+      await processManager.stop(project.id, project.path, project.docker);
     } catch {
       // processManager handles errors internally
     }
@@ -525,6 +571,24 @@ export default function ProjectPage({ project, isActive }: ProjectPageProps) {
               Restart
             </button>
           )}
+
+          {viewMode === "console" ? (
+            <button
+              onClick={() => onViewModeChange("settings")}
+              className="inline-flex items-center gap-1.5 h-7 px-3 text-xs font-medium bg-secondary border border-border rounded-md text-foreground hover:bg-accent active:scale-95 transition-all duration-150"
+            >
+              <Settings2 className="w-3 h-3" />
+              Project Settings
+            </button>
+          ) : (
+            <button
+              onClick={() => onViewModeChange("console")}
+              className="inline-flex items-center gap-1.5 h-7 px-3 text-xs font-medium bg-secondary border border-border rounded-md text-foreground hover:bg-accent active:scale-95 transition-all duration-150"
+            >
+              <ArrowLeft className="w-3 h-3" />
+              Back to Project
+            </button>
+          )}
         </div>
 
         {/* Divider */}
@@ -548,16 +612,146 @@ export default function ProjectPage({ project, isActive }: ProjectPageProps) {
         )}
       </div>
 
-      {/* ── Terminal ────────────────────────────────────────────────────── */}
-      <div
-        className="flex-1 min-h-0 relative overflow-hidden"
-        style={{ backgroundColor: TERM_THEME.background }}
-      >
+      {/* ── Project content ─────────────────────────────────────────────── */}
+      <div className="flex-1 min-h-0">
         <div
-          ref={termContainerRef}
-          className="absolute inset-0"
-          style={{ padding: "10px 12px" }}
-        />
+          className={`h-full min-h-0 relative overflow-hidden ${viewMode === "console" ? "block" : "hidden"}`}
+          style={{ backgroundColor: TERM_THEME.background }}
+        >
+          <div
+            ref={termContainerRef}
+            className="absolute inset-0"
+            style={{ padding: "10px 12px" }}
+          />
+        </div>
+
+        {viewMode === "settings" && (
+          <div className="h-full min-h-0 overflow-y-auto bg-background">
+            <div className="max-w-3xl mx-auto px-8 py-8">
+              <div className="mb-7">
+                <h2 className="text-lg font-semibold text-foreground">Project Settings</h2>
+                <p className="text-sm text-muted-foreground mt-0.5">
+                  Runtime and Docker options for {project.name}.
+                </p>
+              </div>
+
+              {project.useDocker && (
+                <section className="bg-card border border-border rounded-lg overflow-hidden">
+                  <div className="px-5 py-3 border-b border-border/70">
+                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground/60">
+                      Container Runtime
+                    </p>
+                  </div>
+                  <div className="px-5 py-4 text-sm text-muted-foreground space-y-1">
+                    <p>
+                      Mode: <span className="text-foreground">Docker compose</span>
+                    </p>
+                    {project.docker ? (
+                      <>
+                        <p>
+                          Port forwarding:{" "}
+                          <span className="text-foreground">
+                            localhost:{project.docker.hostPort} -&gt; container:{project.docker.containerPort}
+                          </span>
+                        </p>
+                        <p>
+                          Compose file: <span className="text-foreground">{project.docker.composeFile}</span>
+                        </p>
+                      </>
+                    ) : (
+                      <p>Docker runtime metadata will be generated after install/start.</p>
+                    )}
+                    {dockerError && <p className="text-amber-500">Last Docker error: {dockerError}</p>}
+                  </div>
+                </section>
+              )}
+
+              <div className="space-y-6">
+                <section className="bg-card border border-border rounded-lg overflow-hidden">
+                  <div className="px-5 py-3 border-b border-border/70">
+                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground/60">
+                      Runtime
+                    </p>
+                  </div>
+                  <div className="px-5 py-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <label className="space-y-1.5">
+                      <span className="text-xs text-muted-foreground">Runtime version</span>
+                      <select
+                        value={runtimeVersion}
+                        onChange={(e) => setRuntimeVersion(e.target.value)}
+                        className="w-full h-9 px-3 text-sm bg-secondary border border-border rounded-md text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                      >
+                        <option>Node 20 LTS</option>
+                        <option>Node 22 Current</option>
+                        <option>Bun latest</option>
+                      </select>
+                    </label>
+                    <label className="space-y-1.5">
+                      <span className="text-xs text-muted-foreground">Package manager</span>
+                      <select
+                        value={packageManager}
+                        onChange={(e) => setPackageManager(e.target.value)}
+                        className="w-full h-9 px-3 text-sm bg-secondary border border-border rounded-md text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                      >
+                        <option>npm</option>
+                        <option>pnpm</option>
+                        <option>yarn</option>
+                      </select>
+                    </label>
+                  </div>
+                </section>
+
+                <section className="bg-card border border-border rounded-lg overflow-hidden">
+                  <div className="px-5 py-3 border-b border-border/70">
+                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground/60">
+                      Dev Server
+                    </p>
+                  </div>
+                  <div className="px-5 py-4 space-y-4">
+                    <label className="space-y-1.5 block">
+                      <span className="text-xs text-muted-foreground">Startup command</span>
+                      <input
+                        value={startupCommand}
+                        onChange={(e) => setStartupCommand(e.target.value)}
+                        className="w-full h-9 px-3 text-sm bg-secondary border border-border rounded-md text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-ring"
+                        placeholder="npm run dev"
+                      />
+                    </label>
+                    <div className="flex flex-wrap gap-5">
+                      <label className="inline-flex items-center gap-2 text-sm text-foreground">
+                        <input
+                          type="checkbox"
+                          checked={autoInstallDeps}
+                          onChange={(e) => setAutoInstallDeps(e.target.checked)}
+                          className="h-4 w-4 rounded border-border bg-secondary accent-primary"
+                        />
+                        Auto-install dependencies on first run
+                      </label>
+                      <label className="inline-flex items-center gap-2 text-sm text-foreground">
+                        <input
+                          type="checkbox"
+                          checked={enableStrictPorts}
+                          onChange={(e) => setEnableStrictPorts(e.target.checked)}
+                          className="h-4 w-4 rounded border-border bg-secondary accent-primary"
+                        />
+                        Enforce strict port usage
+                      </label>
+                    </div>
+                  </div>
+                </section>
+
+                <div className="flex justify-end">
+                  <button
+                    onClick={() => onViewModeChange("console")}
+                    className="inline-flex items-center gap-1.5 h-9 px-4 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 active:scale-95 transition-all duration-150"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
