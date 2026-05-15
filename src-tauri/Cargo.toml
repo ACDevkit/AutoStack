@@ -3,7 +3,7 @@ name = "autostack"
 version = "0.1.1"
 description = "Instantly deploy and manage a variety of projects and frameworks"
 authors = ["ACDevKit (https://github.com/ACDevkit)"]
-edition = "2026"
+edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

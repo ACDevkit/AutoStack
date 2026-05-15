@@ -5,11 +5,6 @@ on:
     tags:
       - "v*"
 
-# Force the GitHub-provided actions (checkout, setup-node, etc.) to run on
-# Node 24 instead of the deprecated Node 20 runtime.
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
@@ -23,7 +18,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: windows-latest
+          - platform: windows-2025
             args: ""
           - platform: macos-latest
             args: "--target universal-apple-darwin"
@@ -34,14 +29,14 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # The repo root is the autostack/ directory, so package-lock.json is
       # at the checkout root — not inside an "autostack/" subdirectory.
-      - name: Set up Node 20
-        uses: actions/setup-node@v4
+      - name: Set up Node 24
+        uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: package-lock.json
 
