@@ -1,8 +1,6 @@
 <div align="center">
 
-# 🏗️ AutoStack
-
-*Work in progress, this is the very early development.*
+# AutoStack
 
 </div>
 
@@ -10,7 +8,7 @@
 
 ### ⚠️ IMPORTANT WARNING ⚠️
 
-> **Hold on!** This project is in **VERY EARLY DEVELOPMENT**.
+> This project is in **VERY EARLY DEVELOPMENT**.
 >
 > * The current releases are incomplete.
 > * The source code is experimental.
