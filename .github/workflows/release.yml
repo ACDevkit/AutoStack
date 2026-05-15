@@ -46,6 +46,7 @@ jobs:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Cache Cargo
+        if: matrix.platform != 'windows-2025'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
