@@ -14,6 +14,7 @@
 > * The source code is experimental.
 > * It is likely to be buggy or break without notice.
 > * **Use for testing purposes only.**
+> * Update detectiong / auto-updating does not work at all
 
 ---
 
