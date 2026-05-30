@@ -1,12 +1,33 @@
 import { useState } from "react";
-import { X, FolderOpen } from "lucide-react";
+import { X, FolderOpen, Container } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "@/stores/projectStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import FrameworkSelect from "@/components/FrameworkSelect";
+import { createDefaultRuntimeSettings } from "@/lib/projectRuntime";
 
 interface CreateProjectModalProps {
   onClose: () => void;
+}
+
+function ToggleTrack({ checked }: { checked: boolean }) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        "relative w-10 h-6 rounded-full transition-colors duration-200 shrink-0 pointer-events-none",
+        checked ? "bg-primary" : "bg-secondary border border-border",
+      )}
+    >
+      <span
+        className={cn(
+          "absolute top-1 left-1 w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-200",
+          checked && "translate-x-4",
+        )}
+      />
+    </span>
+  );
 }
 
 export default function CreateProjectModal({ onClose }: CreateProjectModalProps) {
@@ -34,6 +55,7 @@ export default function CreateProjectModal({ onClose }: CreateProjectModalProps)
       path: path.trim(),
       templateId: framework,
       useDocker,
+      runtime: createDefaultRuntimeSettings(framework),
       createdAt: now,
       updatedAt: now,
     });
@@ -131,15 +153,24 @@ export default function CreateProjectModal({ onClose }: CreateProjectModalProps)
             </div>
           </div>
 
-          <label className="inline-flex items-center gap-2 text-sm text-foreground">
-            <input
-              type="checkbox"
-              checked={useDocker}
-              onChange={(e) => setUseDocker(e.target.checked)}
-              className="h-4 w-4 rounded border-border bg-secondary accent-primary"
-            />
-            Run this project in Docker containers with local port forwarding
-          </label>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={useDocker}
+            onClick={() => setUseDocker((v) => !v)}
+            className={cn(
+              "w-full flex items-center justify-between gap-3 px-3 h-10",
+              "bg-secondary/50 border border-border rounded-md text-left",
+              "hover:bg-secondary/70 transition-colors cursor-pointer",
+              "focus:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:border-ring",
+            )}
+          >
+            <span className="flex items-center gap-2 min-w-0">
+              <Container className="w-3.5 h-3.5 text-muted-foreground shrink-0" aria-hidden />
+              <span className="text-sm font-medium text-foreground">Run in Docker</span>
+            </span>
+            <ToggleTrack checked={useDocker} />
+          </button>
 
           {/* Footer */}
           <div className="flex items-center justify-end gap-2 pt-2">

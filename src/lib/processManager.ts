@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import type { DockerRuntimeConfig } from "@/types";
+import type { DockerRuntimeConfig, ProjectRuntimeSettings } from "@/types";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -41,6 +41,8 @@ const ERROR_PATTERNS: RegExp[] = [
   /docker engine is not running/i,
   /unable to get image/i,
   /cannot connect to the docker daemon/i,
+  /is not recognized as an internal or external command/i,
+  /\bcommand not found\b/i,
   /the system cannot find the file specified/i,
 ];
 
@@ -217,6 +219,7 @@ class ProcessManager {
     id: string,
     frameworkId: string,
     projectPath: string,
+    runtimeSettings: ProjectRuntimeSettings,
     dockerConfig?: DockerRuntimeConfig,
   ): Promise<void> {
     const state = this.ensure(id);
@@ -228,6 +231,7 @@ class ProcessManager {
         projectId:   id,
         frameworkId,
         projectPath,
+        runtimeSettings,
         dockerConfig: dockerConfig ?? null,
       });
 

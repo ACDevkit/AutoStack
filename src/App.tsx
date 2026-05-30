@@ -177,7 +177,12 @@ export default function App() {
           <div className="px-8 py-8">
             {/* Page header */}
             <div className="flex items-end justify-between mb-6">
-              <h1 className="text-xl font-semibold text-foreground">Projects</h1>
+              <div>
+                <h1 className="text-xl font-semibold text-foreground/90 tracking-tight">Projects</h1>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {projects.length} project{projects.length !== 1 ? "s" : ""}
+                </p>
+              </div>
               {search && (
                 <span className="text-xs text-muted-foreground">
                   {filteredProjects.length} result
@@ -214,14 +219,13 @@ export default function App() {
               {!search && (
                 <button
                   onClick={() => setIsCreateModalOpen(true)}
-                  className="group flex flex-col items-center justify-center gap-2 p-4 h-[152px] bg-transparent border border-dashed border-border hover:border-primary/40 hover:bg-primary/[0.03] rounded-lg transition-all duration-200"
+                  aria-label="New project"
+                  title="New project"
+                  className="group flex items-center justify-center p-4 h-[152px] bg-transparent border border-dashed border-border hover:border-primary/40 hover:bg-primary/[0.03] rounded-lg transition-all duration-200"
                 >
-                  <div className="w-8 h-8 rounded-md border border-dashed border-muted-foreground/30 group-hover:border-primary/50 flex items-center justify-center transition-colors">
-                    <Plus className="w-4 h-4 text-muted-foreground/50 group-hover:text-primary transition-colors" />
+                  <div className="w-9 h-9 rounded-md border border-dashed border-muted-foreground/30 group-hover:border-primary/50 flex items-center justify-center transition-colors">
+                    <Plus className="w-4.5 h-4.5 text-muted-foreground/50 group-hover:text-primary transition-colors" />
                   </div>
-                  <span className="text-xs font-medium text-muted-foreground/60 group-hover:text-muted-foreground transition-colors">
-                    New Project
-                  </span>
                 </button>
               )}
 

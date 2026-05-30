@@ -1,6 +1,6 @@
 [package]
 name = "autostack"
-version = "0.1.1"
+version = "0.1.2"
 description = "Instantly deploy and manage a variety of projects and frameworks"
 authors = ["ACDevKit (https://github.com/ACDevkit)"]
 edition = "2024"

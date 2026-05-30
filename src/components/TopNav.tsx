@@ -187,10 +187,11 @@ export default function TopNav({
         {onDashboard && (
           <button
             onClick={onNewProject}
-            className="flex items-center gap-1.5 h-8 px-3 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 active:scale-95 transition-all"
+            aria-label="New project"
+            title="New project"
+            className="inline-flex items-center justify-center w-8 h-8 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 active:scale-95 transition-all"
           >
             <Plus className="w-3.5 h-3.5" />
-            New Project
           </button>
         )}
 

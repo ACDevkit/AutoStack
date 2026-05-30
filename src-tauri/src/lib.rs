@@ -37,11 +37,21 @@ struct DockerRuntimePrepared {
     compose_file: String,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct ProjectRuntimeSettings {
+    runtime_version: String,
+    package_manager: String,
+    startup_command: String,
+    auto_install_deps: bool,
+    enable_strict_ports: bool,
+}
+
+#[derive(Clone, Debug)]
 struct DockerProfile {
-    image: &'static str,
-    bootstrap_cmd: &'static str,
-    run_cmd: &'static str,
+    image: String,
+    bootstrap_cmd: String,
+    run_cmd: String,
     default_port: u16,
 }
 
@@ -243,72 +253,387 @@ fn pick_host_port(preferred: u16) -> Result<u16, String> {
     Err("Unable to find an open local TCP port for port forwarding.".to_string())
 }
 
-fn docker_profile_for_framework(framework_id: &str) -> DockerProfile {
+fn command_output(cmd: &str, args: &[&str]) -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    let output = {
+        use std::os::windows::process::CommandExt;
+        Command::new(cmd)
+            .args(args)
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let output = Command::new(cmd)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+
+    let output = output.map_err(|e| format!("Failed to run '{cmd}': {e}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "'{cmd} {}' failed: {}",
+            args.join(" "),
+            stderr.trim()
+        ))
+    }
+}
+
+fn parse_major_version(version_text: &str) -> Option<u32> {
+    let mut digits = String::new();
+    let mut started = false;
+    for ch in version_text.chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+            started = true;
+            continue;
+        }
+        if started {
+            break;
+        }
+    }
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse::<u32>().ok()
+    }
+}
+
+fn normalize_package_manager(raw: &str) -> &'static str {
+    match raw.trim().to_lowercase().as_str() {
+        "pnpm" => "pnpm",
+        "yarn" => "yarn",
+        "bun" => "bun",
+        _ => "npm",
+    }
+}
+
+fn is_node_ecosystem_framework(framework_id: &str) -> bool {
+    matches!(
+        framework_id,
+        "react"
+            | "vite"
+            | "vue"
+            | "svelte"
+            | "solid"
+            | "nextjs"
+            | "nuxt"
+            | "astro"
+            | "sveltekit"
+            | "remix"
+            | "nodejs"
+    )
+}
+
+fn package_install_command(package_manager: &str) -> &'static str {
+    match package_manager {
+        "pnpm" => "pnpm install --config.strict-dep-builds=false",
+        "yarn" => "yarn install",
+        "bun" => "bun install",
+        _ => "npm install",
+    }
+}
+
+fn package_run_script_command(package_manager: &str, script: &str) -> String {
+    match package_manager {
+        "bun" => format!("bun run {script}"),
+        "yarn" => format!("yarn {script}"),
+        "pnpm" => format!("pnpm run {script}"),
+        _ => format!("npm run {script}"),
+    }
+}
+
+fn local_package_install_command(package_manager: &str) -> Result<String, String> {
+    fn with_relaxed_pnpm_policy(command: &str) -> String {
+        #[cfg(target_os = "windows")]
+        {
+            format!("set PNPM_CONFIG_STRICT_DEP_BUILDS=false&& {command}")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            format!("PNPM_CONFIG_STRICT_DEP_BUILDS=false {command}")
+        }
+    }
+
+    match package_manager {
+        "pnpm" => {
+            if command_exists("pnpm") {
+                Ok(with_relaxed_pnpm_policy(
+                    "pnpm install --config.strict-dep-builds=false",
+                ))
+            } else if command_exists("corepack") {
+                Ok(with_relaxed_pnpm_policy(
+                    "corepack pnpm install --config.strict-dep-builds=false",
+                ))
+            } else if command_exists("npx") {
+                Ok(with_relaxed_pnpm_policy(
+                    "npx --yes pnpm@latest install --config.strict-dep-builds=false",
+                ))
+            } else {
+                Err("Package manager 'pnpm' is selected but pnpm/corepack/npx is not installed.".to_string())
+            }
+        }
+        "yarn" => {
+            if command_exists("yarn") {
+                Ok("yarn install".to_string())
+            } else if command_exists("corepack") {
+                Ok("corepack yarn install".to_string())
+            } else if command_exists("npx") {
+                Ok("npx --yes yarn@1.22.22 install".to_string())
+            } else {
+                Err("Package manager 'yarn' is selected but yarn/corepack/npx is not installed.".to_string())
+            }
+        }
+        "bun" => {
+            if command_exists("bun") {
+                Ok("bun install".to_string())
+            } else {
+                Err("Package manager 'bun' is selected but Bun is not installed.".to_string())
+            }
+        }
+        _ => {
+            if command_exists("npm") {
+                Ok("npm install".to_string())
+            } else {
+                Err("Package manager 'npm' is selected but npm is not installed.".to_string())
+            }
+        }
+    }
+}
+
+fn local_package_run_script_command(package_manager: &str, script: &str) -> Result<String, String> {
+    fn with_relaxed_pnpm_policy(command: &str) -> String {
+        #[cfg(target_os = "windows")]
+        {
+            format!("set PNPM_CONFIG_STRICT_DEP_BUILDS=false&& {command}")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            format!("PNPM_CONFIG_STRICT_DEP_BUILDS=false {command}")
+        }
+    }
+
+    match package_manager {
+        "pnpm" => {
+            if command_exists("pnpm") {
+                Ok(with_relaxed_pnpm_policy(&format!(
+                    "pnpm --config.strict-dep-builds=false run {script}"
+                )))
+            } else if command_exists("corepack") {
+                Ok(with_relaxed_pnpm_policy(&format!(
+                    "corepack pnpm --config.strict-dep-builds=false run {script}"
+                )))
+            } else if command_exists("npx") {
+                Ok(with_relaxed_pnpm_policy(&format!(
+                    "npx --yes pnpm@latest --config.strict-dep-builds=false run {script}"
+                )))
+            } else {
+                Err("Package manager 'pnpm' is selected but pnpm/corepack/npx is not installed.".to_string())
+            }
+        }
+        "yarn" => {
+            if command_exists("yarn") {
+                Ok(format!("yarn {script}"))
+            } else if command_exists("corepack") {
+                Ok(format!("corepack yarn {script}"))
+            } else if command_exists("npx") {
+                Ok(format!("npx --yes yarn@1.22.22 {script}"))
+            } else {
+                Err("Package manager 'yarn' is selected but yarn/corepack/npx is not installed.".to_string())
+            }
+        }
+        "bun" => {
+            if command_exists("bun") {
+                Ok(format!("bun run {script}"))
+            } else {
+                Err("Package manager 'bun' is selected but Bun is not installed.".to_string())
+            }
+        }
+        _ => {
+            if command_exists("npm") {
+                Ok(format!("npm run {script}"))
+            } else {
+                Err("Package manager 'npm' is selected but npm is not installed.".to_string())
+            }
+        }
+    }
+}
+
+fn ensure_requested_runtime_available(
+    framework_id: &str,
+    runtime_settings: Option<&ProjectRuntimeSettings>,
+    require_scaffold_tools: bool,
+) -> Result<(), String> {
+    if !is_node_ecosystem_framework(framework_id) {
+        return Ok(());
+    }
+
+    let runtime_version = runtime_settings
+        .map(|cfg| cfg.runtime_version.trim())
+        .filter(|v| !v.is_empty())
+        .unwrap_or("node-20-lts");
+    let package_manager = normalize_package_manager(
+        runtime_settings
+            .map(|cfg| cfg.package_manager.as_str())
+            .unwrap_or("npm"),
+    );
+
+    if package_manager == "bun" || runtime_version == "bun-latest" {
+        if !command_exists("bun") {
+            return Err("Bun runtime is selected but 'bun' was not found on PATH.".to_string());
+        }
+    }
+
+    if runtime_version != "bun-latest" {
+        if !command_exists("node") {
+            return Err("Node.js runtime is selected but 'node' was not found on PATH.".to_string());
+        }
+        let node_version = command_output("node", &["--version"])?;
+        let major = parse_major_version(&node_version).ok_or_else(|| {
+            format!("Unable to parse installed Node.js version from '{node_version}'.")
+        })?;
+        let minimum_major = if runtime_version == "node-22-current" { 22 } else { 20 };
+        if major < minimum_major {
+            return Err(format!(
+                "Requested runtime '{}' requires Node {} or newer, but detected {}. Install a newer Node version or change Project Settings.",
+                runtime_version, minimum_major, node_version
+            ));
+        }
+    }
+
+    // Resolve package manager up-front so users get immediate, clear failures.
+    let _ = local_package_install_command(package_manager)?;
+    if require_scaffold_tools && !command_exists("npx") {
+        return Err(
+            "Project scaffolding requires 'npx', but it was not found on PATH. Install Node.js tooling first."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn run_simple_command_line(
+    app: &tauri::AppHandle,
+    event: &str,
+    command_line: &str,
+    cwd: &Path,
+) -> Result<(), String> {
+    let parts: Vec<&str> = command_line.split_whitespace().collect();
+    if parts.is_empty() {
+        return Err("Empty command requested.".to_string());
+    }
+    run_command(app, event, &parts, cwd)
+}
+
+fn node_image_for_runtime(runtime_version: &str) -> String {
+    match runtime_version {
+        "node-22-current" => "node:22-alpine".to_string(),
+        "bun-latest" => "oven/bun:1".to_string(),
+        _ => "node:20-alpine".to_string(),
+    }
+}
+
+fn docker_profile_for_framework(
+    framework_id: &str,
+    runtime_settings: Option<&ProjectRuntimeSettings>,
+) -> DockerProfile {
+    let runtime_version = runtime_settings
+        .map(|cfg| cfg.runtime_version.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("node-20-lts");
+    let package_manager = normalize_package_manager(
+        runtime_settings
+            .map(|cfg| cfg.package_manager.as_str())
+            .unwrap_or("npm"),
+    );
+    let node_image = node_image_for_runtime(runtime_version);
+    let node_bootstrap = package_install_command(package_manager).to_string();
+
     match framework_id {
         "react" => DockerProfile {
-            image: "node:20-alpine",
-            bootstrap_cmd: "npm install",
-            run_cmd: "HOST=0.0.0.0 PORT=${AUTOSTACK_CONTAINER_PORT} npm start",
+            image: node_image,
+            bootstrap_cmd: node_bootstrap,
+            run_cmd: format!(
+                "HOST=0.0.0.0 PORT=${{AUTOSTACK_CONTAINER_PORT}} {}",
+                package_run_script_command(package_manager, "start")
+            ),
             default_port: 3000,
         },
         "vite" | "vue" | "svelte" | "solid" | "astro" | "sveltekit" | "remix" => DockerProfile {
-            image: "node:20-alpine",
-            bootstrap_cmd: "npm install",
-            run_cmd: "npm run dev -- --host 0.0.0.0 --port ${AUTOSTACK_CONTAINER_PORT}",
+            image: node_image,
+            bootstrap_cmd: node_bootstrap,
+            run_cmd: format!(
+                "{} -- --host 0.0.0.0 --port ${{AUTOSTACK_CONTAINER_PORT}}",
+                package_run_script_command(package_manager, "dev")
+            ),
             default_port: 5173,
         },
         "nextjs" | "nuxt" => DockerProfile {
-            image: "node:20-alpine",
-            bootstrap_cmd: "npm install",
-            run_cmd: "npm run dev -- --hostname 0.0.0.0 --port ${AUTOSTACK_CONTAINER_PORT}",
+            image: node_image,
+            bootstrap_cmd: node_bootstrap,
+            run_cmd: format!(
+                "{} -- --hostname 0.0.0.0 --port ${{AUTOSTACK_CONTAINER_PORT}}",
+                package_run_script_command(package_manager, "dev")
+            ),
             default_port: 3000,
         },
         "nodejs" => DockerProfile {
-            image: "node:20-alpine",
-            bootstrap_cmd: "npm install",
-            run_cmd: "node index.js",
+            image: node_image,
+            bootstrap_cmd: node_bootstrap,
+            run_cmd: "node index.js".to_string(),
             default_port: 3000,
         },
         "fastapi" => DockerProfile {
-            image: "python:3.12-slim",
-            bootstrap_cmd: "pip install -r requirements.txt",
-            run_cmd: "uvicorn main:app --host 0.0.0.0 --port ${AUTOSTACK_CONTAINER_PORT} --reload",
+            image: "python:3.12-slim".to_string(),
+            bootstrap_cmd: "pip install -r requirements.txt".to_string(),
+            run_cmd: "uvicorn main:app --host 0.0.0.0 --port ${AUTOSTACK_CONTAINER_PORT} --reload"
+                .to_string(),
             default_port: 8000,
         },
         "django" => DockerProfile {
-            image: "python:3.12-slim",
-            bootstrap_cmd: "pip install -r requirements.txt",
-            run_cmd: "python manage.py runserver 0.0.0.0:${AUTOSTACK_CONTAINER_PORT}",
+            image: "python:3.12-slim".to_string(),
+            bootstrap_cmd: "pip install -r requirements.txt".to_string(),
+            run_cmd: "python manage.py runserver 0.0.0.0:${AUTOSTACK_CONTAINER_PORT}".to_string(),
             default_port: 8000,
         },
         "go" => DockerProfile {
-            image: "golang:1.22-alpine",
-            bootstrap_cmd: "go mod tidy",
-            run_cmd: "go run .",
+            image: "golang:1.22-alpine".to_string(),
+            bootstrap_cmd: "go mod tidy".to_string(),
+            run_cmd: "go run .".to_string(),
             default_port: 8080,
         },
         "rust" => DockerProfile {
-            image: "rust:1.78-slim",
-            bootstrap_cmd: "cargo fetch",
-            run_cmd: "cargo run",
+            image: "rust:1.78-slim".to_string(),
+            bootstrap_cmd: "cargo fetch".to_string(),
+            run_cmd: "cargo run".to_string(),
             default_port: 3000,
         },
         "laravel" => DockerProfile {
-            image: "php:8.3-cli",
-            bootstrap_cmd: "if [ -f composer.json ]; then php -r \"copy('https://getcomposer.org/installer', 'composer-setup.php');\" && php composer-setup.php --install-dir=/usr/local/bin --filename=composer && rm composer-setup.php && composer install; fi",
-            run_cmd: "php artisan serve --host=0.0.0.0 --port=${AUTOSTACK_CONTAINER_PORT}",
+            image: "php:8.3-cli".to_string(),
+            bootstrap_cmd: "if [ -f composer.json ]; then php -r \"copy('https://getcomposer.org/installer', 'composer-setup.php');\" && php composer-setup.php --install-dir=/usr/local/bin --filename=composer && rm composer-setup.php && composer install; fi".to_string(),
+            run_cmd: "php artisan serve --host=0.0.0.0 --port=${AUTOSTACK_CONTAINER_PORT}"
+                .to_string(),
             default_port: 8000,
         },
         "dotnet" => DockerProfile {
-            image: "mcr.microsoft.com/dotnet/sdk:8.0",
-            bootstrap_cmd: "dotnet restore",
-            run_cmd: "dotnet run --urls=http://0.0.0.0:${AUTOSTACK_CONTAINER_PORT}",
+            image: "mcr.microsoft.com/dotnet/sdk:8.0".to_string(),
+            bootstrap_cmd: "dotnet restore".to_string(),
+            run_cmd: "dotnet run --urls=http://0.0.0.0:${AUTOSTACK_CONTAINER_PORT}".to_string(),
             default_port: 5000,
         },
         _ => DockerProfile {
-            image: "node:20-alpine",
-            bootstrap_cmd: "npm install",
-            run_cmd: "npm run dev -- --host 0.0.0.0 --port ${AUTOSTACK_CONTAINER_PORT}",
+            image: node_image,
+            bootstrap_cmd: node_bootstrap,
+            run_cmd: format!(
+                "{} -- --host 0.0.0.0 --port ${{AUTOSTACK_CONTAINER_PORT}}",
+                package_run_script_command(package_manager, "dev")
+            ),
             default_port: 3000,
         },
     }
@@ -334,8 +659,8 @@ fn write_docker_compose(
     container_port: u16,
 ) -> Result<String, String> {
     let compose_file = project_path.join("docker-compose.autostack.yml");
-    let bootstrap = shell_single_quote(profile.bootstrap_cmd);
-    let run = shell_single_quote(&escape_compose_dollar(profile.run_cmd));
+    let bootstrap = shell_single_quote(&profile.bootstrap_cmd);
+    let run = shell_single_quote(&escape_compose_dollar(&profile.run_cmd));
     let compose = format!(
         "services:\n  {service}:\n    image: {image}\n    working_dir: /workspace\n    command: sh -lc '{bootstrap} && {run}'\n    environment:\n      AUTOSTACK_CONTAINER_PORT: \"{container_port}\"\n    ports:\n      - \"{host_port}:{container_port}\"\n    volumes:\n      - ./:/workspace\n",
         service = service_name,
@@ -351,12 +676,20 @@ fn write_docker_compose(
 
 // ─── Install: per-framework setup functions ────────────────────────────────────
 
-fn setup_vite(app: &tauri::AppHandle, event: &str, base: &Path, name: &str, template: &str) -> Result<PathBuf, String> {
+fn setup_vite(
+    app: &tauri::AppHandle,
+    event: &str,
+    base: &Path,
+    name: &str,
+    template: &str,
+    package_manager: &str,
+) -> Result<PathBuf, String> {
     emit_line(app, event, "info", &format!("  Creating {template} project with Vite..."));
     run_command(app, event, &["npm", "create", "vite@latest", name, "--", "--template", template], base)?;
     let dir = base.join(name);
     emit_line(app, event, "info", "  Installing dependencies...");
-    run_command(app, event, &["npm", "install"], &dir)?;
+    let install_cmd = local_package_install_command(package_manager)?;
+    run_simple_command_line(app, event, &install_cmd, &dir)?;
     Ok(dir)
 }
 
@@ -372,57 +705,161 @@ fn setup_angular(app: &tauri::AppHandle, event: &str, base: &Path, name: &str) -
     Ok(base.join(name))
 }
 
-fn setup_nextjs(app: &tauri::AppHandle, event: &str, base: &Path, name: &str) -> Result<PathBuf, String> {
+fn setup_nextjs(
+    app: &tauri::AppHandle,
+    event: &str,
+    base: &Path,
+    name: &str,
+    package_manager: &str,
+) -> Result<PathBuf, String> {
     emit_line(app, event, "info", "  Creating Next.js project...");
-    run_command(app, event, &["npx", "--yes", "create-next-app@latest", name,
-        "--typescript", "--eslint", "--no-tailwind", "--no-app", "--use-npm", "--no-src-dir"], base)?;
+    let manager_flag = match package_manager {
+        "pnpm" => "--use-pnpm",
+        "yarn" => "--use-yarn",
+        "bun" => "--use-bun",
+        _ => "--use-npm",
+    };
+    run_command(
+        app,
+        event,
+        &[
+            "npx",
+            "--yes",
+            "create-next-app@latest",
+            name,
+            "--typescript",
+            "--eslint",
+            "--no-tailwind",
+            "--no-app",
+            manager_flag,
+            "--no-src-dir",
+        ],
+        base,
+    )?;
     Ok(base.join(name))
 }
 
-fn setup_nuxt(app: &tauri::AppHandle, event: &str, base: &Path, name: &str) -> Result<PathBuf, String> {
+fn setup_nuxt(
+    app: &tauri::AppHandle,
+    event: &str,
+    base: &Path,
+    name: &str,
+    package_manager: &str,
+) -> Result<PathBuf, String> {
     emit_line(app, event, "info", "  Creating Nuxt project...");
-    run_command(app, event, &["npx", "--yes", "nuxi@latest", "init", name, "--packageManager", "npm", "--gitInit", "false"], base)?;
+    run_command(
+        app,
+        event,
+        &[
+            "npx",
+            "--yes",
+            "nuxi@latest",
+            "init",
+            name,
+            "--packageManager",
+            package_manager,
+            "--gitInit",
+            "false",
+        ],
+        base,
+    )?;
     let dir = base.join(name);
     emit_line(app, event, "info", "  Installing dependencies...");
-    run_command(app, event, &["npm", "install"], &dir)?;
+    let install_cmd = local_package_install_command(package_manager)?;
+    run_simple_command_line(app, event, &install_cmd, &dir)?;
     Ok(dir)
 }
 
-fn setup_astro(app: &tauri::AppHandle, event: &str, base: &Path, name: &str) -> Result<PathBuf, String> {
+fn setup_astro(
+    app: &tauri::AppHandle,
+    event: &str,
+    base: &Path,
+    name: &str,
+    package_manager: &str,
+) -> Result<PathBuf, String> {
     emit_line(app, event, "info", "  Creating Astro project...");
     run_command(app, event, &["npm", "create", "astro@latest", name, "--",
         "--template", "minimal", "--no-install", "--no-git", "--yes"], base)?;
     let dir = base.join(name);
     emit_line(app, event, "info", "  Installing dependencies...");
-    run_command(app, event, &["npm", "install"], &dir)?;
+    let install_cmd = local_package_install_command(package_manager)?;
+    run_simple_command_line(app, event, &install_cmd, &dir)?;
     Ok(dir)
 }
 
-fn setup_sveltekit(app: &tauri::AppHandle, event: &str, base: &Path, name: &str) -> Result<PathBuf, String> {
+fn setup_sveltekit(
+    app: &tauri::AppHandle,
+    event: &str,
+    base: &Path,
+    name: &str,
+    package_manager: &str,
+) -> Result<PathBuf, String> {
     emit_line(app, event, "info", "  Creating SvelteKit project...");
     run_command(app, event, &["npx", "--yes", "sv", "create", name, "--template", "minimal",
         "--types", "ts", "--no-add-ons"], base)?;
     let dir = base.join(name);
     emit_line(app, event, "info", "  Installing dependencies...");
-    run_command(app, event, &["npm", "install"], &dir)?;
+    let install_cmd = local_package_install_command(package_manager)?;
+    run_simple_command_line(app, event, &install_cmd, &dir)?;
     Ok(dir)
 }
 
-fn setup_remix(app: &tauri::AppHandle, event: &str, base: &Path, name: &str) -> Result<PathBuf, String> {
+fn setup_remix(
+    app: &tauri::AppHandle,
+    event: &str,
+    base: &Path,
+    name: &str,
+    package_manager: &str,
+) -> Result<PathBuf, String> {
     emit_line(app, event, "info", "  Creating Remix project...");
     run_command(app, event, &["npx", "--yes", "create-remix@latest", name,
         "--template", "remix", "--no-git-init", "--no-install"], base)?;
     let dir = base.join(name);
     emit_line(app, event, "info", "  Installing dependencies...");
-    run_command(app, event, &["npm", "install"], &dir)?;
+    let install_cmd = local_package_install_command(package_manager)?;
+    run_simple_command_line(app, event, &install_cmd, &dir)?;
     Ok(dir)
 }
 
-fn setup_nodejs(app: &tauri::AppHandle, event: &str, base: &Path, name: &str) -> Result<PathBuf, String> {
+fn setup_nodejs(
+    app: &tauri::AppHandle,
+    event: &str,
+    base: &Path,
+    name: &str,
+    package_manager: &str,
+) -> Result<PathBuf, String> {
     emit_line(app, event, "info", "  Creating Node.js project...");
     let dir = base.join(name);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    run_command(app, event, &["npm", "init", "-y"], &dir)?;
+    let init_cmd = match package_manager {
+        "pnpm" => {
+            if command_exists("pnpm") {
+                "pnpm init".to_string()
+            } else if command_exists("corepack") {
+                "corepack pnpm init".to_string()
+            } else {
+                "npm init -y".to_string()
+            }
+        }
+        "yarn" => {
+            if command_exists("yarn") {
+                "yarn init -y".to_string()
+            } else if command_exists("corepack") {
+                "corepack yarn init -y".to_string()
+            } else {
+                "npm init -y".to_string()
+            }
+        }
+        "bun" => {
+            if command_exists("bun") {
+                "bun init -y".to_string()
+            } else {
+                "npm init -y".to_string()
+            }
+        }
+        _ => "npm init -y".to_string(),
+    };
+    run_simple_command_line(app, event, &init_cmd, &dir)?;
     write_file(&dir.join("index.js"), concat!(
         "const http = require('http');\n\n",
         "const server = http.createServer((req, res) => {\n",
@@ -535,6 +972,7 @@ fn do_install(
     framework_id: String,
     project_name: String,
     install_path: String,
+    runtime_settings: Option<ProjectRuntimeSettings>,
 ) -> Result<String, String> {
     let event = format!("install_output_{}", project_id);
 
@@ -581,19 +1019,27 @@ fn do_install(
         emit_line(&app, &event, "info", "");
     }
 
+    let package_manager = normalize_package_manager(
+        runtime_settings
+            .as_ref()
+            .map(|cfg| cfg.package_manager.as_str())
+            .unwrap_or("npm"),
+    );
+    ensure_requested_runtime_available(&framework_id, runtime_settings.as_ref(), true)?;
+
     let project_dir = match framework_id.as_str() {
         "react"     => setup_react_default(&app, &event, &base, &safe_project_name)?,
-        "vite"      => setup_vite(&app, &event, &base, &safe_project_name, "react-ts")?,
-        "nextjs"    => setup_nextjs(&app, &event, &base, &safe_project_name)?,
-        "astro"     => setup_astro(&app, &event, &base, &safe_project_name)?,
-        "remix"     => setup_remix(&app, &event, &base, &safe_project_name)?,
+        "vite"      => setup_vite(&app, &event, &base, &safe_project_name, "react-ts", package_manager)?,
+        "nextjs"    => setup_nextjs(&app, &event, &base, &safe_project_name, package_manager)?,
+        "astro"     => setup_astro(&app, &event, &base, &safe_project_name, package_manager)?,
+        "remix"     => setup_remix(&app, &event, &base, &safe_project_name, package_manager)?,
         "angular"   => setup_angular(&app, &event, &base, &safe_project_name)?,
-        "vue"       => setup_vite(&app, &event, &base, &safe_project_name, "vue-ts")?,
-        "svelte"    => setup_vite(&app, &event, &base, &safe_project_name, "svelte-ts")?,
-        "solid"     => setup_vite(&app, &event, &base, &safe_project_name, "solid-ts")?,
-        "nuxt"      => setup_nuxt(&app, &event, &base, &safe_project_name)?,
-        "sveltekit" => setup_sveltekit(&app, &event, &base, &safe_project_name)?,
-        "nodejs"    => setup_nodejs(&app, &event, &base, &safe_project_name)?,
+        "vue"       => setup_vite(&app, &event, &base, &safe_project_name, "vue-ts", package_manager)?,
+        "svelte"    => setup_vite(&app, &event, &base, &safe_project_name, "svelte-ts", package_manager)?,
+        "solid"     => setup_vite(&app, &event, &base, &safe_project_name, "solid-ts", package_manager)?,
+        "nuxt"      => setup_nuxt(&app, &event, &base, &safe_project_name, package_manager)?,
+        "sveltekit" => setup_sveltekit(&app, &event, &base, &safe_project_name, package_manager)?,
+        "nodejs"    => setup_nodejs(&app, &event, &base, &safe_project_name, package_manager)?,
         "fastapi"   => setup_fastapi(&app, &event, &base, &safe_project_name)?,
         "django"    => setup_django(&app, &event, &base, &safe_project_name)?,
         "go"        => setup_go(&app, &event, &base, &safe_project_name)?,
@@ -616,9 +1062,17 @@ async fn install_project(
     framework_id: String,
     project_name: String,
     install_path: String,
+    runtime_settings: Option<ProjectRuntimeSettings>,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        do_install(app, project_id, framework_id, project_name, install_path)
+        do_install(
+            app,
+            project_id,
+            framework_id,
+            project_name,
+            install_path,
+            runtime_settings,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -629,6 +1083,7 @@ fn prepare_docker_runtime(
     project_path: String,
     framework_id: String,
     project_name: String,
+    runtime_settings: Option<ProjectRuntimeSettings>,
     preferred_host_port: Option<u16>,
 ) -> Result<DockerRuntimePrepared, String> {
     ensure_docker_available()?;
@@ -637,7 +1092,7 @@ fn prepare_docker_runtime(
         return Err("Project path does not exist yet. Install/create the project first.".to_string());
     }
 
-    let profile = docker_profile_for_framework(&framework_id);
+    let profile = docker_profile_for_framework(&framework_id, runtime_settings.as_ref());
     let container_port = profile.default_port;
     let preferred = preferred_host_port.unwrap_or(container_port);
     let host_port = pick_host_port(preferred)?;
@@ -682,22 +1137,185 @@ struct PtySessionData {
 /// Global map: project_id → active PTY session.
 pub struct PtySessions(Arc<Mutex<HashMap<String, PtySessionData>>>);
 
-/// Returns the dev-server command for a given framework.
-fn get_start_command(framework_id: &str) -> &'static str {
+fn default_port_for_framework(framework_id: &str) -> u16 {
     match framework_id {
-        "react" => "npm start",
-        "vite" | "vue" | "svelte" | "solid"
-        | "nextjs" | "nuxt" | "astro" | "sveltekit" | "remix" => "npm run dev",
-        "angular"  => "npm start",
-        "nodejs"   => "node index.js",
-        "fastapi"  => "uvicorn main:app --reload",
-        "django"   => "python manage.py runserver",
-        "go"       => "go run .",
-        "rust"     => "cargo run",
-        "laravel"  => "php artisan serve",
-        "dotnet"   => "dotnet run",
-        _          => "npm start",
+        "react" | "nextjs" | "nuxt" | "nodejs" | "rust" => 3000,
+        "vite" | "vue" | "svelte" | "solid" | "astro" | "sveltekit" | "remix" => 5173,
+        "fastapi" | "django" | "laravel" => 8000,
+        "go" => 8080,
+        "dotnet" => 5000,
+        _ => 3000,
     }
+}
+
+fn get_default_start_command(framework_id: &str, package_manager: &str) -> Result<String, String> {
+    match framework_id {
+        "react" | "angular" => local_package_run_script_command(package_manager, "start"),
+        "vite" | "vue" | "svelte" | "solid" | "nextjs" | "nuxt" | "astro" | "sveltekit" | "remix" => {
+            local_package_run_script_command(package_manager, "dev")
+        }
+        "nodejs" => Ok("node index.js".to_string()),
+        "fastapi" => Ok("uvicorn main:app --reload".to_string()),
+        "django" => Ok("python manage.py runserver".to_string()),
+        "go" => Ok("go run .".to_string()),
+        "rust" => Ok("cargo run".to_string()),
+        "laravel" => Ok("php artisan serve".to_string()),
+        "dotnet" => Ok("dotnet run".to_string()),
+        _ => local_package_run_script_command(package_manager, "start"),
+    }
+}
+
+fn resolve_custom_start_command(command: &str) -> Result<String, String> {
+    fn with_relaxed_pnpm_policy(command: &str) -> String {
+        #[cfg(target_os = "windows")]
+        {
+            format!("set PNPM_CONFIG_STRICT_DEP_BUILDS=false&& {command}")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            format!("PNPM_CONFIG_STRICT_DEP_BUILDS=false {command}")
+        }
+    }
+
+    let trimmed = command.trim();
+    let mut parts = trimmed.split_whitespace();
+    let Some(bin) = parts.next() else {
+        return Err("Startup command is empty.".to_string());
+    };
+    let rest = parts.collect::<Vec<_>>().join(" ");
+    match bin.to_lowercase().as_str() {
+        "pnpm" => {
+            if command_exists("pnpm") {
+                Ok(with_relaxed_pnpm_policy(
+                    format!("pnpm --config.strict-dep-builds=false {rest}").trim(),
+                ))
+            } else if command_exists("corepack") {
+                Ok(
+                    with_relaxed_pnpm_policy(
+                        format!("corepack pnpm --config.strict-dep-builds=false {rest}").trim(),
+                    ),
+                )
+            } else if command_exists("npx") {
+                Ok(
+                    with_relaxed_pnpm_policy(
+                        format!("npx --yes pnpm@latest --config.strict-dep-builds=false {rest}").trim(),
+                    ),
+                )
+            } else {
+                Err("Startup command uses 'pnpm' but pnpm/corepack/npx is not installed.".to_string())
+            }
+        }
+        "corepack" => {
+            let mut rest_parts = rest.split_whitespace();
+            if let Some(tool) = rest_parts.next() {
+                if tool.eq_ignore_ascii_case("pnpm") {
+                    let remaining = rest_parts.collect::<Vec<_>>().join(" ");
+                    if command_exists("corepack") {
+                        return Ok(
+                            with_relaxed_pnpm_policy(
+                                format!("corepack pnpm --config.strict-dep-builds=false {remaining}")
+                                    .trim(),
+                            ),
+                        );
+                    }
+                }
+            }
+            Ok(trimmed.to_string())
+        }
+        "yarn" => {
+            if command_exists("yarn") {
+                Ok(trimmed.to_string())
+            } else if command_exists("corepack") {
+                Ok(format!("corepack yarn {rest}").trim().to_string())
+            } else if command_exists("npx") {
+                Ok(format!("npx --yes yarn@1.22.22 {rest}").trim().to_string())
+            } else {
+                Err("Startup command uses 'yarn' but yarn/corepack/npx is not installed.".to_string())
+            }
+        }
+        "bun" => {
+            if command_exists("bun") {
+                Ok(trimmed.to_string())
+            } else {
+                Err("Startup command uses 'bun' but Bun is not installed.".to_string())
+            }
+        }
+        _ => Ok(trimmed.to_string()),
+    }
+}
+
+fn with_strict_port_flags(base_command: String, framework_id: &str) -> String {
+    let port = default_port_for_framework(framework_id);
+    match framework_id {
+        "vite" | "vue" | "svelte" | "solid" | "astro" | "sveltekit" | "remix" => {
+            format!("{base_command} -- --host 127.0.0.1 --port {port} --strictPort")
+        }
+        "nextjs" | "nuxt" => {
+            format!("{base_command} -- --hostname 127.0.0.1 --port {port}")
+        }
+        _ => base_command,
+    }
+}
+
+fn get_start_command(
+    framework_id: &str,
+    runtime_settings: Option<&ProjectRuntimeSettings>,
+) -> Result<String, String> {
+    let package_manager = normalize_package_manager(
+        runtime_settings
+            .map(|cfg| cfg.package_manager.as_str())
+            .unwrap_or("npm"),
+    );
+    let mut cmd = if let Some(settings) = runtime_settings {
+        let custom = settings.startup_command.trim();
+        if !custom.is_empty() {
+            resolve_custom_start_command(custom)?
+        } else {
+            get_default_start_command(framework_id, package_manager)?
+        }
+    } else {
+        get_default_start_command(framework_id, package_manager)?
+    };
+    if let Some(settings) = runtime_settings {
+        if settings.enable_strict_ports {
+            cmd = with_strict_port_flags(cmd, framework_id);
+        }
+    }
+    Ok(cmd)
+}
+
+fn should_auto_install_deps(
+    project_path: &str,
+    framework_id: &str,
+    runtime_settings: Option<&ProjectRuntimeSettings>,
+) -> bool {
+    let Some(settings) = runtime_settings else {
+        return false;
+    };
+    if !settings.auto_install_deps || !is_node_ecosystem_framework(framework_id) {
+        return false;
+    }
+    let project_dir = PathBuf::from(project_path);
+    let package_json = project_dir.join("package.json");
+    let node_modules = project_dir.join("node_modules");
+    let package_manager = normalize_package_manager(settings.package_manager.as_str());
+    let selected_lock_present = match package_manager {
+        "pnpm" => project_dir.join("pnpm-lock.yaml").exists(),
+        "yarn" => project_dir.join("yarn.lock").exists(),
+        "bun" => project_dir.join("bun.lock").exists() || project_dir.join("bun.lockb").exists(),
+        _ => project_dir.join("package-lock.json").exists(),
+    };
+    let other_lock_present = project_dir.join("package-lock.json").exists()
+        || project_dir.join("pnpm-lock.yaml").exists()
+        || project_dir.join("yarn.lock").exists()
+        || project_dir.join("bun.lock").exists()
+        || project_dir.join("bun.lockb").exists();
+    // If another package manager already initialized the project, don't force an
+    // auto-install with a different manager on start. Let user run manually.
+    if !selected_lock_present && other_lock_present {
+        return false;
+    }
+    package_json.exists() && !node_modules.exists()
 }
 
 fn build_shell_input_for_command(project_path: &str, command: &str) -> String {
@@ -905,9 +1523,14 @@ fn start_project(
     project_id: String,
     framework_id: String,
     project_path: String,
+    runtime_settings: Option<ProjectRuntimeSettings>,
     docker_config: Option<DockerRuntimeConfig>,
 ) -> Result<(), String> {
     use std::io::Write;
+
+    if docker_config.as_ref().map(|cfg| !cfg.enabled).unwrap_or(true) {
+        ensure_requested_runtime_available(&framework_id, runtime_settings.as_ref(), false)?;
+    }
 
     let shell_input = if let Some(cfg) = docker_config {
         if cfg.enabled {
@@ -919,12 +1542,30 @@ fn start_project(
             );
             build_shell_input_for_command(&project_path, &docker_cmd)
         } else {
-            let cmd = get_start_command(&framework_id);
-            build_shell_input_for_command(&project_path, cmd)
+            let mut cmd = get_start_command(&framework_id, runtime_settings.as_ref())?;
+            if should_auto_install_deps(&project_path, &framework_id, runtime_settings.as_ref()) {
+                let pm = normalize_package_manager(
+                    runtime_settings
+                        .as_ref()
+                        .map(|cfg| cfg.package_manager.as_str())
+                        .unwrap_or("npm"),
+                );
+                cmd = format!("{} && {}", local_package_install_command(pm)?, cmd);
+            }
+            build_shell_input_for_command(&project_path, &cmd)
         }
     } else {
-        let cmd = get_start_command(&framework_id);
-        build_shell_input_for_command(&project_path, cmd)
+        let mut cmd = get_start_command(&framework_id, runtime_settings.as_ref())?;
+        if should_auto_install_deps(&project_path, &framework_id, runtime_settings.as_ref()) {
+            let pm = normalize_package_manager(
+                runtime_settings
+                    .as_ref()
+                    .map(|cfg| cfg.package_manager.as_str())
+                    .unwrap_or("npm"),
+            );
+            cmd = format!("{} && {}", local_package_install_command(pm)?, cmd);
+        }
+        build_shell_input_for_command(&project_path, &cmd)
     };
 
     let mut map = state.0.lock().unwrap();

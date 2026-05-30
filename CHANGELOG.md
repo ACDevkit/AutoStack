@@ -1,4 +1,4 @@
-# AutoStack — Changelog & Architecture Reference
+# AutoStack — Changelog 
 
 ---
 
@@ -131,380 +131,135 @@ autostack/
 
 ---
 
-### [v0.1.1] — 2026-05-15  ·  Project Settings UI + React/Vite Scaffolding Fixes
-
-**Affected files:** `src/App.tsx`, `src/components/ProjectCard.tsx`, `src/components/ProjectPage.tsx`, `src/lib/frameworks.ts`, `src/components/FrameworkSelect.tsx`, `src-tauri/src/lib.rs`
-
-#### Added project settings front-end flow (no backend wiring yet)
-
-- Added per-project view mode (`console` / `settings`) so settings can open inside a project tab.
-- Dashboard project-card dropdown **Settings** now opens/focuses that project's tab and lands on project settings.
-- Added **Project Settings** button on opened project pages and **Back to Project / Done** navigation back to console.
-- Added placeholder project settings UI (frontend-only) with sensible defaults for runtime/package manager/dev command/toggles.
-
-#### Fixed React scaffolding behavior and framework options
-
-- `react` scaffolding no longer points to Vite; it now uses default React app creation flow.
-- Added `vite` as its own explicit framework option.
-- Updated start command mapping so React uses `npm start` while Vite-based projects use `npm run dev`.
-- Refined visible framework options to the React-focused set requested (React, Vite, Next.js, Astro, Remix), while keeping backend frameworks available.
-
-#### Fixed installer naming failures (capitalization and invalid chars)
-
-- Added centralized project-name sanitization in install flow (lowercase + safe slug format).
-- Installer now auto-corrects invalid names before scaffolding instead of failing (e.g. `"React"` → `react`).
-- Added automatic unique suffixing when the target folder already exists (`name-2`, `name-3`, ...).
-
-- Switched to Docker-managed containers for projects with port forwarding.
-
-### [v0.1.0] — 2026-05-06  ·  Full PTY Terminal — Interactive Shell & Real Input
-
-**Affected files:** `src-tauri/Cargo.toml`, `src-tauri/src/lib.rs`, `src/lib/processManager.ts`, `src/components/ProjectPage.tsx`
-
-#### Problem being solved
-
-The terminal in each project tab could display output but completely ignored user input. Every keystroke showed "(shell not connected — `<cmd>`)" because there was no real shell connection. Specifically:
-
-1. **No PTY**: Processes were spawned with `Stdio::piped()`, which creates plain OS pipes, not a console. Tools like Vite, Node, and Python detect a non-TTY stdin and disable interactive features (keyboard shortcuts like `q`/`r`/`h` in Vite, readline in Node REPL, etc.).
-2. **Ctrl+C broken**: Writing `\x03` to a pipe does NOT deliver SIGINT to the foreground process. Only a real PTY console can do that.
-3. **No shell**: When the dev server was stopped there was nothing to type commands into.
-4. **`\r` progress bars broken**: Tools that use carriage-return to overwrite lines (npm install progress, Vite rebuild spinner) didn't render because `BufReader::lines()` only released output on `\n`.
-
-#### Solution: PTY-per-project using `portable-pty`
-
-Each opened project tab now gets a real **PTY shell** (`cmd.exe /K` on Windows, `$SHELL` or `bash` on Unix) running in the project directory. All terminal I/O goes through this PTY which means:
-- Every keystroke (including arrow keys, Tab completion, Ctrl+C, Ctrl+D, Ctrl+Z) is forwarded to the real shell via `write_shell_input`.
-- The shell sees a real console — tools enable interactive mode, color, and keyboard shortcuts.
-- Starting a dev server = typing the command into the shell. Stopping = sending `\x03` (Ctrl+C) which the PTY delivers as a SIGINT to the foreground process group.
-- A real shell prompt is available whenever the dev server is not running.
-
-#### Changes — `src-tauri/Cargo.toml`
-
-Added: `portable-pty = "0.8"`
-
-`portable-pty` (by the WezTerm team) wraps:
-- **Windows**: Windows 10 1809+ ConPTY (`CreatePseudoConsole`) — no winpty.dll needed
-- **Unix**: POSIX PTY (openpty/forkpty)
-
-No additional system SDK is required on Windows 10/11.
-
-#### Changes — `src-tauri/src/lib.rs`
-
-**Removed:**
-- `RunningProcesses` state and map (was `HashMap<String, Child>`)
-- `kill_child()` function (taskkill + child.kill)
-- `spawn_dev_server()` function (separate process spawning for dev server)
-- `stream_raw()` helper (chunk streaming for the old separate dev server process)
-- `Child` import from `std::process` (no longer stored)
-
-**New type: `SendMaster`**
-```rust
-struct SendMaster(Box<dyn portable_pty::MasterPty>);
-unsafe impl Send for SendMaster {}
-```
-The `MasterPty` trait does not have `Send` as a supertrait, but all concrete implementations (`ConPtyMaster` on Windows, `UnixMasterPty` on Unix) are in fact thread-safe. This newtype allows moving the master into the master-owning thread while being explicit about the unsafety.
-
-**New type: `MasterMsg` enum**
-```rust
-enum MasterMsg { Resize(PtySize), Shutdown }
-```
-Channel messages to the master-owning thread. Resize requests and shutdown are multiplexed through one `mpsc::SyncSender<MasterMsg>`.
-
-**New type: `PtySessionData` + `PtySessions` state**
-```rust
-struct PtySessionData {
-    writer: Box<dyn Write + Send>,      // stdin → shell
-    master_tx: SyncSender<MasterMsg>,   // resize / shutdown
-}
-pub struct PtySessions(Arc<Mutex<HashMap<String, PtySessionData>>>);
-```
-
-**New command: `open_shell(project_id, project_path, cols, rows)`**
-- Idempotent: if a session already exists for `project_id`, sends a resize message and returns immediately.
-- Spawns `cmd.exe /K` (Windows) or `$SHELL` (Unix) via `portable_pty::native_pty_system().openpty()`.
-- Sets `TERM=xterm-256color`, `COLORTERM=truecolor`, `FORCE_COLOR=1`, `PYTHONUNBUFFERED=1`.
-- Starts **two threads**:
-  - *Master-owning thread*: holds `SendMaster` and the `Child` handle; processes `MasterMsg::Resize` and `MasterMsg::Shutdown`.
-  - *Reader thread*: reads PTY output in 4 KB raw chunks; emits each as `shell_output_{id}` with `kind="raw"`; on EOF emits `shell_exit_{id}`, removes the session from the map (so a future `open_shell` creates a fresh shell), and signals master thread to shut down.
-
-**New command: `close_shell(project_id)`**
-Removes the session from the map and sends `MasterMsg::Shutdown` to the master thread, which kills the child and drops the PTY master.
-
-**New command: `write_shell_input(project_id, data)`**
-Writes raw bytes to the PTY master's write end. Called for every `onData` event from xterm.js (including Ctrl+C = `\x03`, arrow keys, Tab, etc.).
-
-**New command: `resize_shell(project_id, cols, rows)`**
-Sends `MasterMsg::Resize(PtySize { rows, cols, .. })` to the master thread, which calls `master.resize()`. Without this, line-wrapping breaks after any terminal resize.
-
-**Updated: `start_project(project_id, framework_id, project_path)`**
-No longer spawns a separate process. Instead writes a platform-appropriate "navigate then run" string to the shell stdin:
-- Windows: `cd /d "{path}"\r\n{cmd}\r\n`
-- Unix: `cd '{path}' && {cmd}\n`
-
-The PTY echoes the command, runs it, and all output flows through the existing `shell_output_{id}` stream. No new event channels are needed.
-
-**Updated: `stop_project(project_id)`**
-Writes `\x03` (ETX / Ctrl+C) to the PTY write end. The ConPTY (or Unix PTY) delivers this as SIGINT to the foreground process group — exactly what happens when a user presses Ctrl+C in a real terminal. Works correctly for all frameworks.
-
-**Updated: `run()` (app entry)**
-`.manage(PtySessions(...))` replaces the old `.manage(RunningProcesses(...))`.
-New commands registered: `open_shell`, `close_shell`, `write_shell_input`, `resize_shell`.
-
-#### Changes — `src/lib/processManager.ts`
-
-**New: `RUNNING_PATTERNS` array**
-A set of regexes checked against incoming `shell_output_{id}` chunks while phase === `"starting"`. The first match transitions the project to `"running"`. Patterns cover:
-- Vite: `Local:\s+http`, `ready in \d+`
-- Next.js 12: `ready - started server`
-- Next.js 13+: `✓ Ready`
-- Angular: `Application bundle generation complete`
-- Django: `Starting development server`
-- FastAPI/uvicorn: `Uvicorn running`
-- .NET: `Now listening on`
-- Go/Rust: `Listening on http`
-- Laravel: `development server started`
-- Generic: `localhost:\d+`, `0.0.0.0:\d+`
-
-**New: `attachShell(id): Promise<() => void>`**
-Registers the two permanent Tauri event listeners for a project's PTY shell:
-- `shell_output_{id}` → buffers the chunk and pushes it to all in-memory output subscribers. Also scans for `RUNNING_PATTERNS` to detect startup.
-- `shell_exit_{id}` → tears down listeners and sets phase to `"stopped"` (unless `intentionalStop` is set).
-
-Returns a cleanup function that must be called on component unmount.
-
-Idempotent: if `state.shellAttached` is already true, returns a no-op cleanup immediately.
-
-**Updated: `start(id, frameworkId, projectPath)`**
-- No longer sets up Tauri event listeners (that's `attachShell`'s responsibility).
-- Sets phase to `"starting"`, invokes `start_project` (which writes to the shell), then starts an 8-second fallback timer that transitions to `"running"` if no startup pattern was detected.
-
-**Updated: `stop(id)`**
-- No longer tears down event listeners (listeners stay alive while the PTY shell is open).
-- Sets `intentionalStop = true`, invokes `stop_project` (Ctrl+C to PTY), then sets phase to `"stopped"`.
-
-**Updated: `ProjectState` interface**
-Added `shellAttached: boolean` field (initialized `false`). Set to `true` by `attachShell`, reset to `false` by `teardownListeners`.
-
-#### Changes — `src/components/ProjectPage.tsx`
-
-**Removed:**
-- The fake `term.onData` handler that displayed "(shell not connected — `<cmd>`)" and the `line` buffer used for local editing.
-- The `Reconnected` buffer-replay logic (the shell now starts fresh on every mount; no buffer replay is needed).
-- The final `❯` prompt write (the real PTY shell shows its own prompt).
-- The "Shell integration coming soon." hint message.
-
-**Updated: terminal `useEffect`**
-
-The single `useEffect` (keyed on `project.id`) now does:
-
-1. **Create xterm** — unchanged.
-2. **Write banner** — updated copy: "Click Start above or type commands below."
-3. **`writeLine` helper** — unchanged (handles `raw`/`info`/`err`/`success`/`out`).
-4. **Subscribe to processManager** — unchanged (in-memory callback → xterm write).
-5. **NEW: `term.onData(data => invoke("write_shell_input", ...))`** — every keystroke from xterm is forwarded verbatim to the PTY. This includes:
-   - Printable characters
-   - Arrow keys, Home, End, PageUp/Down (escape sequences)
-   - Tab (→ shell completion)
-   - Ctrl+C (`\x03` → SIGINT to foreground process)
-   - Ctrl+D (`\x04` → EOF → exits shell or Python REPL)
-   - Ctrl+Z (`\x1a` → SIGTSTP on Unix)
-   - Ctrl+L (`\x0c` → clear screen)
-6. **NEW: `initShell()` async function** — called inside the effect:
-   - Calls `processManager.attachShell(project.id)` to register Tauri listeners.
-   - Calls `invoke("open_shell", { projectId, projectPath, cols, rows })`.
-   - If component unmounts before async completes, the cleanup runs immediately.
-7. **NEW: `ResizeObserver`** — after `fit.fit()`, checks if `cols`/`rows` actually changed (tracked in `lastCols`/`lastRows`) before calling `invoke("resize_shell")` to avoid flooding the Rust side with redundant resize messages.
-
-**Cleanup (return value of `useEffect`):**
-- Calls `detachShell()` (processManager listener cleanup).
-- Calls `unsubOutput()` (in-memory xterm callback cleanup).
-- Disconnects `ResizeObserver`.
-- Disposes xterm terminal.
-- Calls `invoke("close_shell", { projectId })` to kill the PTY shell.
-
-**Updated: `isActive` resize `useEffect`**
-Now also calls `invoke("resize_shell", ...)` after `fit.fit()` when the tab becomes visible, keeping PTY dimensions in sync after tab switches.
-
-**Updated: `handleInstall()`**
-After install completes and the project path is known, calls `open_shell` again with the new path. Since `open_shell` is idempotent, this updates the existing shell's cwd via a resize message. (The shell was already running in a temp/home dir during install; the `cd` embedded in `start_project` ensures the dev server runs in the correct directory regardless.)
+# AutoStack Changelog
 
 ---
 
-### [v0.1.0] — 2026-05-06  ·  Settings Updates UI (Version + Check Button)
+## [v0.1.2] — 2026-05-29
 
-**Affected file:** `src/components/SettingsPage.tsx`
+### Runtime Settings Wiring + Package Manager Reliability
 
-#### What changed
+**Files:** `types/index.ts`, `projectRuntime.ts`, `CreateProjectModal.tsx`, `ProjectPage.tsx`, `installer.ts`, `processManager.ts`, `docker.ts`, `persistence.ts`, `lib.rs`
 
-- Added a dedicated **Updates** section styled with the same `Section` and
-  `SettingRow` patterns used across the Settings page.
-- Renamed the first update row label from **"Application Update"** to
-  **"AutoStack Updates"** for better product fit.
-- Added a persistent **current version** badge (`Current vX.Y.Z`) in the update
-  row, loaded via `getVersion()` from `@tauri-apps/api/app`.
-- Added placeholder update-check states with themed UI:
-  - idle: `Check for Updates` button
-  - checking: spinner + "Checking for updates..."
-  - up-to-date: success badge
-  - available: version-available indicator + `Download & Install` button
-  - error: warning text + `Retry` button
-- Added a placeholder **Release Channel** selector (`Stable`, `Beta`) for future
-  backend wiring.
+**Added**
+- Project runtime settings are now persisted per project (runtime version, package manager, startup command, auto-install dependencies, strict ports)
+- New projects receive framework-aware runtime defaults, and existing projects are normalized on load for backward compatibility
+- Runtime settings are now passed end-to-end into install/start/Docker flows instead of being UI-only
 
-#### Notes
+**Fixed**
+- Project Settings runtime controls now affect real behavior (install commands, startup command resolution, and Docker runtime generation)
+- Runtime validation now checks environment/tooling before install/start and returns clearer actionable errors when required tools are missing
+- Package manager execution is more resilient with fallback paths (`corepack`, `npx`) and improved startup error detection to avoid stuck "running" states
+- Auto-install logic now avoids unsafe repeated installs when lockfiles belong to a different package manager
+- Project settings and run button re-modified to look better
+- Dashboard projects section modified
 
-- This is intentionally UI-only for now. No updater backend commands are wired
-  yet; the check action uses simulated status transitions so the interface can
-  be reviewed and polished first.
+**Removed**
+- Subtitle line in Project Settings header
+---
+
+## [v0.1.1] — 2026-05-15
+
+### Project Settings UI + React/Vite Scaffolding Fixes
+
+**Files:** `App.tsx`, `ProjectCard.tsx`, `ProjectPage.tsx`, `frameworks.ts`, `FrameworkSelect.tsx`, `lib.rs`
+
+**Added**
+- Per-project view modes (`console` / `settings`) — settings now open inline inside a project tab instead of navigating away
+- Settings shortcut from the dashboard card dropdown
+- Project Settings button on open project pages with Back / Done navigation
+- Placeholder settings UI with defaults for runtime, package manager, dev command, and misc toggles
+
+**Fixed**
+- `react` scaffold was incorrectly pointing at Vite; it now uses the standard React creation flow
+- Added `vite` as its own explicit framework option
+- Start command mapping corrected — React uses `npm start`, Vite projects use `npm run dev`
+- Project name sanitization added to the install flow (auto-lowercased + slugified before scaffolding)
+- Installer no longer fails on names like `"React"` — auto-corrects instead of erroring
+- Duplicate folder names now get auto-suffixed (`name-2`, `name-3`, ...) instead of crashing
 
 ---
 
-### [v.0.1.0] — 2026-05-06  ·  Console & Process Output Overhaul
+## [v0.1.0] — 2026-05-06
 
-**Affected files:** `src-tauri/src/lib.rs`, `src/components/ProjectPage.tsx`
+### Full PTY Terminal — Interactive Shell & Real Input
 
-#### Problem being solved
+**Files:** `Cargo.toml`, `lib.rs`, `processManager.ts`, `ProjectPage.tsx`
 
-1. On Windows, every process AutoStack spawned (npm, node, vite, cargo, pip,
-   etc.) was causing the OS to open a visible `cmd.exe` console window.  This
-   was confusing and looked broken — users saw a black cmd window flash or stay
-   open beside the app.
-2. The dev-server output streamer used `BufReader::lines()` which only releases
-   a line when a `\n` character arrives.  Tools like Vite write progress
-   indicators and server-ready banners using `\r` (carriage return) to rewrite
-   the same line in-place.  With line-based reading those sequences never
-   flushed correctly, making the terminal look stuck.
-3. Install commands were missing `FORCE_COLOR`, `COLORTERM`, and
-   `PYTHONUNBUFFERED` environment variables, so npm/npx output arrived without
-   ANSI colour and Python tools buffered their output instead of streaming it.
-4. `taskkill.exe` (used to kill the process tree on Windows) was also spawned
-   without `CREATE_NO_WINDOW`, causing a brief cmd flash on every Stop.
+Previously the terminal could display output but ignored all keyboard input. Ctrl+C didn't work, tools like Vite disabled interactive mode because there was no real TTY, and `\r`-based progress bars never rendered properly.
 
-#### Changes — `src-tauri/src/lib.rs`
+Each project tab now gets a real PTY shell — `cmd.exe /K` on Windows, `$SHELL` on Unix — via `portable-pty`. All I/O goes through it.
 
-**New: `shell_cmd(cmd_str) -> Command` helper**
-- Replaces the repeated `#[cfg(windows)] Command::new("cmd").args(["/C", …])` /
-  `#[cfg(not)] Command::new("sh").args(["-c", …])` pattern used in both
-  `run_command` and `spawn_dev_server`.
-- On Windows, calls `.creation_flags(0x0800_0000)` (`CREATE_NO_WINDOW`) via the
-  `std::os::windows::process::CommandExt` trait.  This flag tells the OS to
-  create the process with a hidden console that is never shown as a window.
-  Child processes that inherit this console (npm → node, pip, cargo, etc.)
-  also have no visible window.
-- On non-Windows, produces `sh -c "…"` unchanged.
+**What this means in practice:**
+- Keyboard input (including arrow keys, Tab completion, Ctrl+C, Ctrl+D) works as expected
+- Tools detect a real TTY and enable interactive mode, color output, and keyboard shortcuts
+- Starting a dev server = typing the command into the shell; stopping = sending Ctrl+C through the PTY
+- A shell prompt is available whenever a server isn't running
 
-**Updated: `run_command` (install commands)**
-- Now uses `shell_cmd` instead of the old duplicated cfg blocks.
-- Added environment variables to every install spawn:
-  - `FORCE_COLOR=1` — Node.js/npm/npx honour this flag and emit ANSI colour
-    even when stdout is a pipe (not a real TTY).
-  - `COLORTERM=truecolor` — tells colour-aware tools the terminal supports 24-bit.
-  - `PYTHONUNBUFFERED=1` — Python writes stdout immediately instead of
-    buffering 8 KB before flushing; required for real-time pip output.
-- Streaming strategy kept as `BufReader::lines()` (line-by-line) because
-  install output is plain progress text that the frontend annotates with colour
-  tags.  This is correct and intentional for the install use-case.
+**Rust (`lib.rs`)**
+- Removed `RunningProcesses` state, `kill_child()`, `spawn_dev_server()`, and `stream_raw()` — all replaced by the PTY model
+- Added `open_shell`, `close_shell`, `write_shell_input`, `resize_shell` commands
+- `start_project` now writes a `cd && run` string to the shell instead of spawning a separate process
+- `stop_project` now sends `\x03` to the PTY instead of calling `taskkill`
+- Added `SendMaster` newtype to safely move the PTY master across threads
 
-**Updated: `kill_child` (Windows branch)**
-- Added `.creation_flags(0x0800_0000)` to the `taskkill` `Command` spawn.
-- Prevents the brief black "taskkill" flash that appeared every time a project
-  was stopped.
+**TypeScript (`processManager.ts`)**
+- Added `attachShell()` — registers `shell_output_{id}` and `shell_exit_{id}` Tauri listeners, handles startup detection, and returns a cleanup function
+- Added `RUNNING_PATTERNS` — regex set that detects when a dev server is ready (covers Vite, Next.js, Angular, Django, FastAPI, .NET, Go, Rust, Laravel, and generic `localhost:PORT` patterns)
+- `start()` and `stop()` no longer manage Tauri listeners directly
 
-**New: `stream_raw(app, event, pipe) -> JoinHandle` helper**
-- Reads the given pipe in 4 KB byte chunks using `Read::read()` in a loop.
-- Converts each chunk to a `String` with `String::from_utf8_lossy()` (invalid
-  UTF-8 bytes are replaced with `U+FFFD` — no panic on binary noise).
-- Emits each chunk as a Tauri event with `kind: "raw"` so the frontend can
-  forward it verbatim to xterm.js.
-- Replacing `BufReader::lines()` with chunked `read()` means:
-  - `\r`-based progress bars (npm install progress, Vite rebuild indicator)
-    render correctly in xterm.
-  - ANSI escape sequences that span a `\n` boundary are never split mid-sequence.
-  - Output appears as soon as the OS makes it available, not after a newline.
-
-**Updated: `spawn_dev_server`**
-- Now uses `shell_cmd` (gets `CREATE_NO_WINDOW` automatically on Windows).
-- Added `TERM=xterm-256color` environment variable so tools that inspect `$TERM`
-  know to use colour and cursor sequences.
-- Removed the old duplicated `#[cfg(windows)]` / `#[cfg(not)]` spawn blocks.
-
-**Updated: `start_project` command**
-- Now calls `stream_raw(…, stdout)` and `stream_raw(…, stderr)` instead of
-  two `thread::spawn(|| BufReader::lines())` closures.
-- Both stdout and stderr are forwarded with `kind: "raw"`.  Previously stderr
-  was tagged `"err"` and rendered in amber; now the tool's own ANSI colours
-  take precedence (Vite, for example, colours its server URL in cyan).
-- The `▶  npm run dev` banner is still emitted as `kind: "info"` (dimmed grey)
-  before the process is spawned, which is correct since it's a status message
-  from the runner, not output from the tool.
-
-**Updated: `open_folder`**
-- Restructured from `let result = …; result.map(…)` to proper `#[cfg]` blocks
-  each returning directly.
-- Added `CREATE_NO_WINDOW` to the Windows `explorer` spawn for consistency
-  (no-op since explorer is a GUI app, but makes the pattern uniform).
-
-**Imports added:**
-- `std::io::Read` (for `pipe.read(&mut buf)` in `stream_raw`)
-
-#### Changes — `src/components/ProjectPage.tsx`
-
-**Updated: `writeLine` (inside terminal `useEffect`)**
-- Added `case "raw": term.write(line); break;` as the first branch.
-- `term.write()` (not `term.writeln()`) is critical here: `writeln` appends
-  `\r\n` which would corrupt raw ANSI sequences and double-newline every chunk.
-- xterm.js maintains full ANSI parser state across successive `write()` calls,
-  so split escape sequences that span chunk boundaries are handled correctly.
-- Used for: buffer replay, live output subscription (both call `writeLine`).
-
-**Updated: `writeToTerm` (outside `useEffect`)**
-- Same `case "raw": term.write(line)` addition.
-- Used for: install output forwarding and the start/stop banner writes.
-
-#### What was NOT changed (intentional)
-
-- `processManager.ts` — The `OutputLine` interface `{ line: string, kind: string }`
-  already accommodates `kind: "raw"` without any changes.  The buffer stores raw
-  chunks the same as any other line, and replays them identically on tab reopen.
-- `installer.ts` — Install still uses the line-based `"out"/"err"/"info"/"success"`
-  kind system.  This is intentional: install output is annotated status text,
-  not raw terminal output.
-- `process.ts` — This file is a duplicate/alternate API that is NOT imported by
-  `ProjectPage.tsx`.  It exists but is inert.  Left as-is.
-- `default.json` (capabilities) — No permission changes needed.
-- `Cargo.toml` — No new dependencies needed; `std::os::windows::process` and
-  `std::io::Read` are part of the Rust standard library.
+**React (`ProjectPage.tsx`)**
+- Removed the fake input handler that printed "(shell not connected)"
+- `term.onData` now forwards every keystroke to `write_shell_input`
+- Added `initShell()` to open the PTY and attach listeners on mount
+- Added `ResizeObserver` that calls `resize_shell` only when dimensions actually change
+- Cleanup properly closes the shell, removes listeners, and disposes xterm
 
 ---
 
-### [Pre-release] — 2026-05-05  ·  Initial Git history cleanup
+### Settings — Updates UI
 
-**Commits (oldest → newest):**
+**File:** `SettingsPage.tsx`
 
-| Hash | Message | What happened |
+- Added an Updates section with current version badge (via `getVersion()`)
+- Update check states: idle, checking, up-to-date, update available, error — all with appropriate UI
+- Added Release Channel selector (Stable / Beta) for future use
+- Backend not wired yet; transitions are simulated for UI review
+
+---
+
+### Console & Process Output Overhaul
+
+**Files:** `lib.rs`, `ProjectPage.tsx`
+
+**Fixed**
+- On Windows, spawned processes (npm, node, pip, cargo, etc.) were opening visible `cmd.exe` windows — fixed by passing `CREATE_NO_WINDOW` via a `shell_cmd()` helper used across all spawns
+- `taskkill` flash on project stop — same fix applied
+- `\r`-based progress bars (npm install, Vite rebuild spinner) weren't rendering — switched dev server output from `BufReader::lines()` to 4 KB chunk reads
+- npm/npx output was colorless through pipes — added `FORCE_COLOR=1` and `COLORTERM=truecolor` to all spawns
+- Python output was buffered instead of streaming — added `PYTHONUNBUFFERED=1`
+
+**Terminal output**
+- Added `case "raw": term.write(line)` to `writeLine` and `writeToTerm` — uses `write()` not `writeln()` to avoid corrupting ANSI sequences with extra newlines
+
+---
+
+## [Pre-release] — 2026-05-05
+
+Initial git history, gitignore setup, and GitHub Actions workflow fixes. Core application code predates this history.
+
+---
+
+## Known Issues
+
+| # | Area | Issue |
 |---|---|---|
-| `ae68aaf` | File system fix git | Initial tracked state; gitignore corrected |
-| `738437a` | Gitignore v2 | Refined `.gitignore` |
-| `8c6bc36` | fix gitignore | Additional gitignore fix |
-| `d0fec2a` | Fixing files & workflow | File and GitHub Actions workflow corrections |
-| `e338695` | Git ignore and workflow fix v2 | Final gitignore + workflow stabilisation |
-
-These commits represent the project's initial file-system and CI setup phase.
-The core application code (Rust backend, React frontend, all components) was
-already written before this git history begins.
-
----
-
-## Current Known Issues / Future Work
-
-| # | Area | Issue | Notes |
-|---|---|---|---|
-| 1 | `process.ts` | Redundant file — same API as `processManager.ts` | Safe to delete, nothing imports it |
-| 2 | `package.json` | Both `xterm@5` (legacy) and `@xterm/xterm@6` listed | `xterm@5` can be removed; the codebase imports only from `@xterm/xterm` |
-| 3 | `tauri.conf.json` | `"csp": null` — Content Security Policy is disabled | Fine for dev/internal; should be set before public distribution |
-| 4 | Updater backend | Updates UI is currently placeholder-only | `SettingsPage` check/install actions are simulated; wire to real updater commands later |
-| 5 | `src/assets/logo.png` | Imported by `TopNav.tsx` but not visible in search | May be untracked or missing; could cause build failure |
-| 6 | `greet` command | Registered in `invoke_handler!` but unused by any UI | Can be removed |
+| 1 | `process.ts` | Redundant file, safe to delete — nothing imports it |
+| 2 | `package.json` | Both `xterm@5` and `@xterm/xterm@6` listed — `xterm@5` can be removed |
+| 3 | `tauri.conf.json` | CSP is disabled (`null`) — fine for now, set before public release |
+| 4 | Updater | Updates UI is placeholder only — backend not wired |
+| 5 | `logo.png` | Imported by `TopNav.tsx` but may be missing from repo |
+| 6 | `greet` command | Registered in Rust but unused — can be removed |
 
 ---
 
@@ -545,5 +300,3 @@ doesn't allocate a console at all; `CREATE_NO_WINDOW` is applied for
 consistency but is a no-op there.
 
 ---
-
-*Last updated: 2026-05-06 by AI assistant (Cursor, Codex 5.3)*

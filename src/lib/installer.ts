@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { ProjectRuntimeSettings } from "@/types";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -21,6 +22,7 @@ export interface InstallParams {
   projectName: string;
   /** Absolute path to the parent directory. Pass "" to use the default (~/AutoStack). */
   installPath: string;
+  runtimeSettings: ProjectRuntimeSettings;
   onOutput: (output: InstallOutput) => void;
 }
 
@@ -36,7 +38,14 @@ export interface InstallParams {
  * Throws (rejects) with a string error message on failure.
  */
 export async function installProject(params: InstallParams): Promise<string> {
-  const { projectId, frameworkId, projectName, installPath, onOutput } = params;
+  const {
+    projectId,
+    frameworkId,
+    projectName,
+    installPath,
+    runtimeSettings,
+    onOutput,
+  } = params;
 
   const eventName = `install_output_${projectId}`;
 
@@ -51,6 +60,7 @@ export async function installProject(params: InstallParams): Promise<string> {
       frameworkId,
       projectName,
       installPath,
+      runtimeSettings,
     });
     return resultPath;
   } finally {

@@ -17,6 +17,10 @@ import { installProject, type InstallOutput } from "@/lib/installer";
 import { prepareDockerRuntime } from "@/lib/docker";
 import { processManager, type RunPhase } from "@/lib/processManager";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  deriveDefaultStartupCommand,
+  normalizeRuntimeSettings,
+} from "@/lib/projectRuntime";
 
 // ─── Status helpers ────────────────────────────────────────────────────────────
 
@@ -58,6 +62,26 @@ function StatusBadge({ status, message }: { status: ProjectStatus; message?: str
       <span className="h-2 w-2 rounded-full bg-muted-foreground/40 shrink-0" />
       Offline
     </span>
+  );
+}
+
+function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+      className={`relative w-10 h-6 rounded-full transition-colors duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+        checked ? "bg-primary" : "bg-secondary border border-border"
+      }`}
+    >
+      <span
+        className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-200 ${
+          checked ? "translate-x-4" : "translate-x-0"
+        }`}
+      />
+    </button>
   );
 }
 
@@ -117,11 +141,12 @@ export default function ProjectPage({
   const [installPhase, setInstallPhase] = useState<InstallPhase>("idle");
   const [installError, setInstallError] = useState<string | null>(null);
   const [dockerError, setDockerError] = useState<string | null>(null);
-  const [runtimeVersion, setRuntimeVersion] = useState("Node 20 LTS");
-  const [packageManager, setPackageManager] = useState("npm");
-  const [startupCommand, setStartupCommand] = useState("npm run dev");
-  const [autoInstallDeps, setAutoInstallDeps] = useState(true);
-  const [enableStrictPorts, setEnableStrictPorts] = useState(false);
+  const runtime = normalizeRuntimeSettings(project.runtime, project.templateId);
+
+  function updateRuntime(patch: Partial<typeof runtime>) {
+    const next = { ...runtime, ...patch };
+    updateProject(project.id, { runtime: next });
+  }
 
   // ── Run state — initialised from the global processManager ───────────────────
   const [runPhase, setRunPhase] = useState<RunPhase>(
@@ -365,6 +390,7 @@ export default function ProjectPage({
         frameworkId: project.templateId,
         projectName: project.name,
         installPath: defaultProjectLocation,
+        runtimeSettings: runtime,
         onOutput:    (o: InstallOutput) => writeToTerm(o.line, o.kind),
       });
       updateProject(project.id, { path: installedPath });
@@ -375,6 +401,7 @@ export default function ProjectPage({
             projectPath: installedPath,
             frameworkId: project.templateId,
             projectName: project.name,
+            runtimeSettings: runtime,
           });
           updateProject(project.id, { docker });
           setDockerError(null);
@@ -426,11 +453,18 @@ export default function ProjectPage({
           projectPath: project.path,
           frameworkId: project.templateId,
           projectName: project.name,
+          runtimeSettings: runtime,
           preferredHostPort: dockerConfig?.hostPort,
         });
         updateProject(project.id, { docker: dockerConfig });
       }
-      await processManager.start(project.id, project.templateId, project.path, dockerConfig);
+      await processManager.start(
+        project.id,
+        project.templateId,
+        project.path,
+        runtime,
+        dockerConfig,
+      );
     } catch (err) {
       writeToTerm("", "info");
       writeToTerm(`  ✗ Failed to start: ${String(err)}`, "err");
@@ -541,10 +575,11 @@ export default function ProjectPage({
           {!isNotSetup && runPhase === "stopped" && (
             <button
               onClick={handleStart}
-              className="inline-flex items-center gap-1.5 h-7 px-3 text-xs font-medium bg-emerald-600 text-white rounded-md hover:bg-emerald-500 active:scale-95 transition-all duration-150"
+              aria-label="Start project"
+              title="Start project"
+              className="inline-flex items-center justify-center h-7 w-7 text-xs font-medium bg-emerald-600 text-white rounded-md hover:bg-emerald-500 active:scale-95 transition-all duration-150"
             >
               <Play className="w-3 h-3 fill-current" />
-              Start
             </button>
           )}
           {!isNotSetup && runPhase === "starting" && (
@@ -565,20 +600,22 @@ export default function ProjectPage({
           {!isNotSetup && runPhase === "error" && (
             <button
               onClick={handleStart}
-              className="inline-flex items-center gap-1.5 h-7 px-3 text-xs font-medium text-amber-600 border border-amber-600/30 rounded-md hover:bg-amber-600/10 active:scale-95 transition-all duration-150"
+              aria-label="Restart project"
+              title="Restart project"
+              className="inline-flex items-center justify-center h-7 w-7 text-xs font-medium text-amber-600 border border-amber-600/30 rounded-md hover:bg-amber-600/10 active:scale-95 transition-all duration-150"
             >
               <RotateCcw className="w-3 h-3" />
-              Restart
             </button>
           )}
 
           {viewMode === "console" ? (
             <button
               onClick={() => onViewModeChange("settings")}
-              className="inline-flex items-center gap-1.5 h-7 px-3 text-xs font-medium bg-secondary border border-border rounded-md text-foreground hover:bg-accent active:scale-95 transition-all duration-150"
+              aria-label="Project settings"
+              title="Project settings"
+              className="inline-flex items-center justify-center h-7 w-7 text-xs font-medium bg-secondary border border-border rounded-md text-foreground hover:bg-accent active:scale-95 transition-all duration-150"
             >
               <Settings2 className="w-3 h-3" />
-              Project Settings
             </button>
           ) : (
             <button
@@ -586,7 +623,7 @@ export default function ProjectPage({
               className="inline-flex items-center gap-1.5 h-7 px-3 text-xs font-medium bg-secondary border border-border rounded-md text-foreground hover:bg-accent active:scale-95 transition-all duration-150"
             >
               <ArrowLeft className="w-3 h-3" />
-              Back to Project
+              Back to Console
             </button>
           )}
         </div>
@@ -630,9 +667,6 @@ export default function ProjectPage({
             <div className="max-w-3xl mx-auto px-8 py-8">
               <div className="mb-7">
                 <h2 className="text-lg font-semibold text-foreground">Project Settings</h2>
-                <p className="text-sm text-muted-foreground mt-0.5">
-                  Runtime and Docker options for {project.name}.
-                </p>
               </div>
 
               {project.useDocker && (
@@ -677,25 +711,58 @@ export default function ProjectPage({
                     <label className="space-y-1.5">
                       <span className="text-xs text-muted-foreground">Runtime version</span>
                       <select
-                        value={runtimeVersion}
-                        onChange={(e) => setRuntimeVersion(e.target.value)}
+                        value={runtime.runtimeVersion}
+                        onChange={(e) => {
+                          const nextRuntime = e.target.value as typeof runtime.runtimeVersion;
+                          const currentDefault = deriveDefaultStartupCommand(
+                            project.templateId,
+                            runtime.packageManager,
+                          );
+                          const nextPackageManager =
+                            nextRuntime === "bun-latest" ? "bun" : runtime.packageManager;
+                          const nextDefault = deriveDefaultStartupCommand(
+                            project.templateId,
+                            nextPackageManager,
+                          );
+                          const shouldUpdateStartup = runtime.startupCommand === currentDefault;
+                          updateRuntime({
+                            runtimeVersion: nextRuntime,
+                            ...(nextPackageManager !== runtime.packageManager
+                              ? { packageManager: nextPackageManager }
+                              : {}),
+                            ...(shouldUpdateStartup ? { startupCommand: nextDefault } : {}),
+                          });
+                        }}
                         className="w-full h-9 px-3 text-sm bg-secondary border border-border rounded-md text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
                       >
-                        <option>Node 20 LTS</option>
-                        <option>Node 22 Current</option>
-                        <option>Bun latest</option>
+                        <option value="node-20-lts">Node 20 LTS</option>
+                        <option value="node-22-current">Node 22 Current</option>
+                        <option value="bun-latest">Bun latest</option>
                       </select>
                     </label>
                     <label className="space-y-1.5">
                       <span className="text-xs text-muted-foreground">Package manager</span>
                       <select
-                        value={packageManager}
-                        onChange={(e) => setPackageManager(e.target.value)}
+                        value={runtime.packageManager}
+                        onChange={(e) => {
+                          const nextPm = e.target.value as typeof runtime.packageManager;
+                          const currentDefault = deriveDefaultStartupCommand(
+                            project.templateId,
+                            runtime.packageManager,
+                          );
+                          const nextDefault = deriveDefaultStartupCommand(project.templateId, nextPm);
+                          const shouldUpdateStartup = runtime.startupCommand === currentDefault;
+                          updateRuntime({
+                            packageManager: nextPm,
+                            ...(shouldUpdateStartup ? { startupCommand: nextDefault } : {}),
+                          });
+                        }}
                         className="w-full h-9 px-3 text-sm bg-secondary border border-border rounded-md text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
                       >
-                        <option>npm</option>
-                        <option>pnpm</option>
-                        <option>yarn</option>
+                        <option value="npm">npm</option>
+                        <option value="pnpm">pnpm</option>
+                        <option value="yarn">yarn</option>
+                        <option value="bun">bun</option>
                       </select>
                     </label>
                   </div>
@@ -711,31 +778,33 @@ export default function ProjectPage({
                     <label className="space-y-1.5 block">
                       <span className="text-xs text-muted-foreground">Startup command</span>
                       <input
-                        value={startupCommand}
-                        onChange={(e) => setStartupCommand(e.target.value)}
+                        value={runtime.startupCommand}
+                        onChange={(e) => updateRuntime({ startupCommand: e.target.value })}
                         className="w-full h-9 px-3 text-sm bg-secondary border border-border rounded-md text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-ring"
                         placeholder="npm run dev"
                       />
                     </label>
-                    <div className="flex flex-wrap gap-5">
-                      <label className="inline-flex items-center gap-2 text-sm text-foreground">
-                        <input
-                          type="checkbox"
-                          checked={autoInstallDeps}
-                          onChange={(e) => setAutoInstallDeps(e.target.checked)}
-                          className="h-4 w-4 rounded border-border bg-secondary accent-primary"
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between gap-4 p-3 rounded-md border border-border bg-secondary/30">
+                        <div>
+                          <p className="text-sm font-medium text-foreground">Auto-install dependencies</p>
+                          <p className="text-xs text-muted-foreground">Install dependencies automatically on first run.</p>
+                        </div>
+                        <Toggle
+                          checked={runtime.autoInstallDeps}
+                          onChange={(next) => updateRuntime({ autoInstallDeps: next })}
                         />
-                        Auto-install dependencies on first run
-                      </label>
-                      <label className="inline-flex items-center gap-2 text-sm text-foreground">
-                        <input
-                          type="checkbox"
-                          checked={enableStrictPorts}
-                          onChange={(e) => setEnableStrictPorts(e.target.checked)}
-                          className="h-4 w-4 rounded border-border bg-secondary accent-primary"
+                      </div>
+                      <div className="flex items-center justify-between gap-4 p-3 rounded-md border border-border bg-secondary/30">
+                        <div>
+                          <p className="text-sm font-medium text-foreground">Strict port mode</p>
+                          <p className="text-xs text-muted-foreground">Prefer fixed framework ports when supported.</p>
+                        </div>
+                        <Toggle
+                          checked={runtime.enableStrictPorts}
+                          onChange={(next) => updateRuntime({ enableStrictPorts: next })}
                         />
-                        Enforce strict port usage
-                      </label>
+                      </div>
                     </div>
                   </div>
                 </section>

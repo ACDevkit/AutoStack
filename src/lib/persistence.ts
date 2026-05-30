@@ -1,6 +1,7 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import type { Project } from "@/types";
 import type { AppLanguage, AppTheme } from "@/stores/settingsStore";
+import { normalizeRuntimeSettings } from "@/lib/projectRuntime";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -71,7 +72,10 @@ export async function loadProjects(): Promise<Project[]> {
   try {
     const store = await getProjectsStore();
     const projects = await store.get<Project[]>("projects");
-    return projects ?? [];
+    return (projects ?? []).map((project) => ({
+      ...project,
+      runtime: normalizeRuntimeSettings(project.runtime, project.templateId),
+    }));
   } catch (err) {
     console.warn("[persistence] Failed to load projects, starting fresh:", err);
     return [];
