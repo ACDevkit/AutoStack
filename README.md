@@ -34,6 +34,7 @@
   <br><br>
   <img width="1280" height="820" alt="autostack screenshot 2" src="https://github.com/user-attachments/assets/48c6c939-3fc6-4375-b282-21dc81203447" />
   <br><br>
-  <img width="1280" height="820" alt="autostack screenshot 3" src="https://github.com/user-attachments/assets/c792aa86-48ce-4313-af8b-a67698d2a5de" />
+  <img width="1280" height="820" alt="autostack screenshot 3" src="https://github.com/user-attachments/assets/6c529601-83ce-47e2-a3c5-55a5eee9b4df" />
   <br>
 </div>
+
