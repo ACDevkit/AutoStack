@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { ChevronDown, Check } from "lucide-react";
+import { ChevronDown, Check, Search } from "lucide-react";
 import {
   SiReact, SiVite, SiNextdotjs, SiAstro, SiRemix,
   SiNodedotjs, SiFastapi, SiDjango, SiGo, SiRust, SiLaravel, SiDotnet,
@@ -50,7 +50,9 @@ interface FrameworkSelectProps {
 
 export default function FrameworkSelect({ value, onChange }: FrameworkSelectProps) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
   const containerRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   const selected = getFrameworkById(value) ?? null;
 
   useEffect(() => {
@@ -62,6 +64,21 @@ export default function FrameworkSelect({ value, onChange }: FrameworkSelectProp
     if (open) document.addEventListener("mousedown", handleOutside);
     return () => document.removeEventListener("mousedown", handleOutside);
   }, [open]);
+
+  // Reset the filter whenever the dropdown closes; focus the search on open.
+  useEffect(() => {
+    if (open) {
+      const id = requestAnimationFrame(() => searchRef.current?.focus());
+      return () => cancelAnimationFrame(id);
+    }
+    setQuery("");
+  }, [open]);
+
+  const q = query.trim().toLowerCase();
+  const matches = (fw: Framework) =>
+    fw.name.toLowerCase().includes(q) ||
+    fw.category.toLowerCase().includes(q) ||
+    fw.id.toLowerCase().includes(q);
 
   return (
     <div ref={containerRef} className="relative">
@@ -95,15 +112,32 @@ export default function FrameworkSelect({ value, onChange }: FrameworkSelectProp
 
       {/* Dropdown panel */}
       {open && (
-        <div className="absolute z-[60] left-0 right-0 mt-1.5 rounded-lg shadow-2xl shadow-black/70 overflow-hidden border border-border bg-[oklch(0.13_0_0)]">
+        <div
+          className="absolute z-[60] left-0 right-0 mt-1.5 rounded-lg overflow-hidden border border-border bg-popover origin-top animate-in fade-in zoom-in-95 slide-in-from-top-1 duration-150"
+          style={{ boxShadow: "var(--shadow-popover)" }}
+        >
+          {/* Search / filter */}
+          <div className="relative border-b border-border/60">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
+            <input
+              ref={searchRef}
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search frameworks..."
+              className="w-full h-9 pl-9 pr-3 text-sm bg-transparent text-foreground placeholder:text-muted-foreground/60 focus:outline-none"
+            />
+          </div>
+
           <div className="max-h-[240px] overflow-y-auto">
             {CATEGORIES.map((cat, catIdx) => {
-              const items = FRAMEWORKS.filter((f) => f.category === cat);
+              const items = FRAMEWORKS.filter((f) => f.category === cat && matches(f));
+              if (items.length === 0) return null;
               return (
                 <div key={cat}>
                   {/* Category label */}
                   <div className={cn(
-                    "px-3 py-2 text-[9px] font-semibold uppercase tracking-[0.14em] text-muted-foreground/40 bg-[oklch(0.13_0_0)] sticky top-0",
+                    "px-3 py-2 text-[9px] font-semibold uppercase tracking-[0.14em] text-muted-foreground/40 bg-popover sticky top-0",
                     catIdx > 0 && "border-t border-border/40"
                   )}>
                     {cat}
@@ -117,13 +151,20 @@ export default function FrameworkSelect({ value, onChange }: FrameworkSelectProp
                         type="button"
                         onClick={() => { onChange(fw.id); setOpen(false); }}
                         className={cn(
-                          "w-full flex items-center gap-2.5 px-3 py-2 text-sm transition-colors",
+                          "w-full flex items-center gap-2.5 px-3 py-1.5 text-sm transition-colors",
                           fw.id === value
-                            ? "bg-primary/10 text-foreground"
-                            : "text-foreground/75 hover:bg-white/[0.04] hover:text-foreground",
+                            ? "bg-primary-soft text-foreground"
+                            : "text-foreground/75 hover:bg-accent/60 hover:text-foreground",
                         )}
                       >
-                        <FrameworkIcon fw={fw} size={15} />
+                        <span
+                          className="w-6 h-6 rounded-md flex items-center justify-center shrink-0"
+                          style={{
+                            backgroundColor: `color-mix(in oklch, ${fw.color} 10%, transparent)`,
+                          }}
+                        >
+                          <FrameworkIcon fw={fw} size={14} />
+                        </span>
                         <span className="flex-1 text-left">{fw.name}</span>
                         {fw.id === value && (
                           <Check className="w-3 h-3 text-primary shrink-0" />
@@ -134,6 +175,12 @@ export default function FrameworkSelect({ value, onChange }: FrameworkSelectProp
                 </div>
               );
             })}
+
+            {!FRAMEWORKS.some(matches) && (
+              <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                No frameworks match "<span className="text-foreground">{query}</span>"
+              </div>
+            )}
           </div>
         </div>
       )}

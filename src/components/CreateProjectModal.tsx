@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { X, FolderOpen, Container } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { X, FolderOpen, Container, FolderPlus } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "@/stores/projectStore";
@@ -9,7 +9,14 @@ import { createDefaultRuntimeSettings } from "@/lib/projectRuntime";
 
 interface CreateProjectModalProps {
   onClose: () => void;
+  /** Pre-select a framework (e.g. from an EmptyState quick-start chip). */
+  initialFramework?: string;
 }
+
+const CLOSE_ANIMATION_MS = 150;
+
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 function ToggleTrack({ checked }: { checked: boolean }) {
   return (
@@ -30,14 +37,60 @@ function ToggleTrack({ checked }: { checked: boolean }) {
   );
 }
 
-export default function CreateProjectModal({ onClose }: CreateProjectModalProps) {
+export default function CreateProjectModal({ onClose, initialFramework }: CreateProjectModalProps) {
   const addProject             = useProjectStore((s) => s.addProject);
   const defaultProjectLocation = useSettingsStore((s) => s.defaultProjectLocation);
   const [name, setName]               = useState("");
   const [description, setDescription] = useState("");
-  const [framework, setFramework]     = useState("");
+  const [framework, setFramework]     = useState(initialFramework ?? "");
   const [path, setPath]               = useState("");
-  const [useDocker, setUseDocker]     = useState(true);
+  const [useDocker, setUseDocker]     = useState(false);
+  const [isClosing, setIsClosing]     = useState(false);
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  // Animate out, then unmount via onClose.
+  function requestClose() {
+    if (closeTimerRef.current) return;
+    setIsClosing(true);
+    closeTimerRef.current = setTimeout(onClose, CLOSE_ANIMATION_MS);
+  }
+
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        requestClose();
+        return;
+      }
+      // Focus trap: keep Tab cycling within the modal panel.
+      if (e.key === "Tab") {
+        const panel = panelRef.current;
+        if (!panel) return;
+        const focusables = Array.from(
+          panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+        ).filter((el) => el.offsetParent !== null || el === document.activeElement);
+        if (focusables.length === 0) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement as HTMLElement | null;
+        if (e.shiftKey) {
+          if (active === first || !panel.contains(active)) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else if (active === last || !panel.contains(active)) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function browsePath() {
     const selected = await open({ directory: true, multiple: false });
@@ -59,25 +112,56 @@ export default function CreateProjectModal({ onClose }: CreateProjectModalProps)
       createdAt: now,
       updatedAt: now,
     });
-    onClose();
+    requestClose();
   }
 
   function handleBackdropClick(e: React.MouseEvent<HTMLDivElement>) {
-    if (e.target === e.currentTarget) onClose();
+    if (e.target === e.currentTarget) requestClose();
   }
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      className={cn(
+        "fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm",
+        isClosing
+          ? "animate-out fade-out duration-150"
+          : "animate-in fade-in duration-200",
+      )}
       onClick={handleBackdropClick}
     >
-      <div className="relative w-full max-w-md bg-card border border-border rounded-xl shadow-2xl shadow-black/50 p-6 mx-4">
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Create new project"
+        className={cn(
+          "relative w-full max-w-md bg-card border border-border rounded-2xl p-6 mx-4",
+          isClosing
+            ? "animate-out fade-out zoom-out-95 duration-150"
+            : "animate-in fade-in zoom-in-95 slide-in-from-bottom-2 duration-200",
+        )}
+        style={{
+          boxShadow: "inset 0 1px 0 var(--border-highlight), var(--shadow-modal)",
+        }}
+      >
         {/* Header */}
         <div className="flex items-center justify-between mb-5">
-          <h2 className="text-base font-semibold text-foreground">Create New Project</h2>
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-9 h-9 rounded-xl bg-primary-soft ring-1 ring-primary/20 flex items-center justify-center shrink-0">
+              <FolderPlus className="w-4.5 h-4.5 text-primary" />
+            </div>
+            <div className="min-w-0">
+              <h2 className="text-base font-semibold text-foreground leading-tight">
+                Create New Project
+              </h2>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Scaffold and manage a new project
+              </p>
+            </div>
+          </div>
           <button
-            onClick={onClose}
-            className="w-7 h-7 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+            onClick={requestClose}
+            className="w-7 h-7 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0"
           >
             <X className="w-4 h-4" />
           </button>
@@ -176,7 +260,7 @@ export default function CreateProjectModal({ onClose }: CreateProjectModalProps)
           <div className="flex items-center justify-end gap-2 pt-2">
             <button
               type="button"
-              onClick={onClose}
+              onClick={requestClose}
               className="h-8 px-4 text-sm font-medium text-muted-foreground hover:text-foreground bg-secondary hover:bg-accent border border-border rounded-md transition-colors"
             >
               Cancel
@@ -184,7 +268,11 @@ export default function CreateProjectModal({ onClose }: CreateProjectModalProps)
             <button
               type="submit"
               disabled={!name.trim() || !framework}
-              className="h-8 px-4 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 active:scale-95 disabled:opacity-40 disabled:pointer-events-none transition-all"
+              className="h-8 px-4 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary-emphasis active:scale-95 disabled:opacity-40 disabled:pointer-events-none transition-all"
+              style={{
+                boxShadow:
+                  "0 2px 10px -2px color-mix(in oklch, var(--primary) 35%, transparent)",
+              }}
             >
               Create Project
             </button>

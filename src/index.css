@@ -41,6 +41,20 @@
     --color-background: var(--background);
     --color-tertiary: var(--tertiary);
     --color-tertiary-foreground: var(--tertiary-foreground);
+    --color-surface-sunken: var(--surface-sunken);
+    --color-surface-raised: var(--surface-raised);
+    --color-primary-emphasis: var(--primary-emphasis);
+    --color-primary-soft: var(--primary-soft);
+    --color-success: var(--success);
+    --color-success-soft: var(--success-soft);
+    --color-warning: var(--warning);
+    --color-warning-soft: var(--warning-soft);
+    --color-danger: var(--danger);
+    --color-danger-soft: var(--danger-soft);
+    --color-info: var(--info);
+    --color-info-soft: var(--info-soft);
+    --color-border-strong: var(--border-strong);
+    --color-border-highlight: var(--border-highlight);
     --radius-sm: calc(var(--radius) * 0.6);
     --radius-md: calc(var(--radius) * 0.8);
     --radius-lg: var(--radius);
@@ -89,15 +103,45 @@
     /* scrollbar */
     --scrollbar-thumb: oklch(0.78 0 0);
     --scrollbar-thumb-hover: oklch(0.65 0 0);
+    /* elevation surfaces */
+    --surface-sunken: oklch(0.945 0 0);
+    --surface-raised: oklch(1 0 0);
+    /* brand */
+    --primary-emphasis: oklch(0.48 0.21 263);
+    --primary-soft: oklch(0.55 0.21 263 / 10%);
+    --gradient-brand: linear-gradient(135deg, oklch(0.55 0.21 268), oklch(0.55 0.18 300));
+    /* semantic status */
+    --success: oklch(0.55 0.15 152);
+    --success-soft: oklch(0.55 0.15 152 / 12%);
+    --warning: oklch(0.60 0.14 70);
+    --warning-soft: oklch(0.70 0.15 75 / 15%);
+    --danger: oklch(0.57 0.22 27);
+    --danger-soft: oklch(0.57 0.22 27 / 10%);
+    --info: oklch(0.55 0.14 230);
+    --info-soft: oklch(0.55 0.14 230 / 12%);
+    /* borders */
+    --border-strong: oklch(0 0 0 / 15%);
+    --border-highlight: oklch(1 0 0 / 70%);
+    /* elevation shadows */
+    --shadow-card: 0 1px 2px oklch(0 0 0 / 0.06);
+    --shadow-raised: 0 6px 16px -4px oklch(0 0 0 / 0.10), 0 2px 4px oklch(0 0 0 / 0.06);
+    --shadow-popover: 0 8px 24px -4px oklch(0 0 0 / 0.16);
+    --shadow-modal: 0 24px 48px -12px oklch(0 0 0 / 0.25);
+    /* motion */
+    --motion-fast: 120ms;
+    --motion-base: 200ms;
+    --motion-slow: 320ms;
+    --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+    --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 /* ─── Dark theme ──────────────────────────────────────────────────────────── */
 .dark {
     --background: oklch(0.07 0 0);
     --foreground: oklch(0.95 0 0);
-    --card: oklch(0.12 0 0);
+    --card: oklch(0.125 0.004 264);
     --card-foreground: oklch(0.95 0 0);
-    --popover: oklch(0.12 0 0);
+    --popover: oklch(0.13 0.004 264);
     --popover-foreground: oklch(0.95 0 0);
     --primary: oklch(0.58 0.21 263);
     --primary-foreground: oklch(0.98 0 0);
@@ -129,6 +173,30 @@
     /* scrollbar */
     --scrollbar-thumb: oklch(0.30 0 0);
     --scrollbar-thumb-hover: oklch(0.42 0 0);
+    /* elevation surfaces */
+    --surface-sunken: oklch(0.05 0 0);
+    --surface-raised: oklch(0.16 0.005 264);
+    /* brand */
+    --primary-emphasis: oklch(0.66 0.20 263);
+    --primary-soft: oklch(0.58 0.21 263 / 12%);
+    --gradient-brand: linear-gradient(135deg, oklch(0.62 0.21 270), oklch(0.60 0.18 300));
+    /* semantic status */
+    --success: oklch(0.72 0.17 152);
+    --success-soft: oklch(0.72 0.17 152 / 12%);
+    --warning: oklch(0.80 0.16 80);
+    --warning-soft: oklch(0.80 0.16 80 / 12%);
+    --danger: oklch(0.65 0.24 27);
+    --danger-soft: oklch(0.65 0.24 27 / 12%);
+    --info: oklch(0.70 0.15 230);
+    --info-soft: oklch(0.70 0.15 230 / 12%);
+    /* borders */
+    --border-strong: oklch(1 0 0 / 12%);
+    --border-highlight: oklch(1 0 0 / 7%);
+    /* elevation shadows */
+    --shadow-card: 0 1px 2px oklch(0 0 0 / 0.40);
+    --shadow-raised: 0 8px 20px -6px oklch(0 0 0 / 0.50), 0 2px 6px oklch(0 0 0 / 0.35);
+    --shadow-popover: 0 12px 32px -8px oklch(0 0 0 / 0.65);
+    --shadow-modal: 0 32px 64px -16px oklch(0 0 0 / 0.70);
 }
 
 @layer base {
@@ -164,5 +232,157 @@
     .dark select option {
         background-color: oklch(0.14 0 0);
         color: oklch(0.95 0 0);
+    }
+}
+
+/* ─── Surface recipes (depth system) ─────────────────────────────────────── */
+@layer components {
+    /* Resting card: layered surface lit faintly from above */
+    .surface-card {
+        background-color: var(--card);
+        background-image: linear-gradient(to bottom, oklch(1 0 0 / 0.02), transparent 55%);
+        border: 1px solid var(--border);
+        box-shadow: inset 0 1px 0 var(--border-highlight), var(--shadow-card);
+    }
+    /* Interactive cards: lift + strengthen on hover, optional status glow */
+    .surface-card-interactive {
+        transition:
+            background-color var(--motion-base) var(--ease-out-expo),
+            border-color var(--motion-base) var(--ease-out-expo),
+            box-shadow var(--motion-base) var(--ease-out-expo),
+            transform var(--motion-base) var(--ease-out-expo);
+    }
+    .surface-card-interactive:hover {
+        background-color: var(--surface-raised);
+        border-color: var(--border-strong);
+        box-shadow:
+            inset 0 1px 0 var(--border-highlight),
+            var(--shadow-raised),
+            var(--card-glow, 0 0 0 0 transparent);
+        transform: translateY(-2px);
+    }
+    .surface-card-interactive:active {
+        transform: translateY(-1px) scale(0.99);
+    }
+    /* Status glows — consumed by .surface-card-interactive:hover */
+    .glow-primary { --card-glow: 0 10px 28px -10px color-mix(in oklch, var(--primary) 35%, transparent); }
+    .glow-success { --card-glow: 0 10px 28px -10px color-mix(in oklch, var(--success) 32%, transparent); }
+    .glow-warning { --card-glow: 0 10px 28px -10px color-mix(in oklch, var(--warning) 30%, transparent); }
+    .glow-danger  { --card-glow: 0 10px 28px -10px color-mix(in oklch, var(--danger) 32%, transparent); }
+    /* Brand gradient fill */
+    .bg-gradient-brand {
+        background-image: var(--gradient-brand);
+    }
+}
+
+/* ─── Motion keyframes ───────────────────────────────────────────────────── */
+@keyframes card-enter {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes shimmer-sweep {
+    from { background-position: 200% 0; }
+    to   { background-position: -200% 0; }
+}
+@keyframes float-gentle {
+    0%, 100% { transform: translateY(0); }
+    50%      { transform: translateY(-6px); }
+}
+@keyframes glow-pulse {
+    0%, 100% { opacity: 0.45; }
+    50%      { opacity: 1; }
+}
+/* Opacity-only tab content cross-fade (no transform → safe under sticky headers) */
+@keyframes tab-fade-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}
+/* One-shot celebration when a project first comes online (opacity-only = cheap) */
+@keyframes success-flash {
+    0%   { opacity: 0; }
+    18%  { opacity: 1; }
+    100% { opacity: 0; }
+}
+/* Quick check-mark pop on install/start success (transform + opacity only) */
+@keyframes success-pop {
+    0%   { opacity: 0; transform: scale(0.5); }
+    30%  { opacity: 1; transform: scale(1.12); }
+    45%  { transform: scale(1); }
+    80%  { opacity: 1; }
+    100% { opacity: 0; transform: scale(1); }
+}
+
+@layer utilities {
+    .animate-card-enter {
+        animation: card-enter var(--motion-slow) var(--ease-out-expo) backwards;
+    }
+    .animate-shimmer {
+        background-image: linear-gradient(
+            100deg,
+            transparent 35%,
+            oklch(1 0 0 / 0.05) 50%,
+            transparent 65%
+        );
+        background-size: 250% 100%;
+        animation: shimmer-sweep 1.8s ease-in-out infinite;
+    }
+    .animate-float-gentle {
+        animation: float-gentle 5s ease-in-out infinite;
+    }
+    .animate-glow-pulse {
+        animation: glow-pulse 4s ease-in-out infinite;
+    }
+    .animate-success-flash {
+        animation: success-flash 1100ms var(--ease-out-expo) forwards;
+    }
+    .animate-success-pop {
+        animation: success-pop 1400ms var(--ease-out-expo) forwards;
+    }
+    .animate-tab-fade {
+        animation: tab-fade-in var(--motion-base) var(--ease-out-expo);
+    }
+}
+
+/* ─── Reduced motion ─────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+    /* Decorative animations that rest in a visible state — just freeze them */
+    .animate-card-enter,
+    .animate-shimmer,
+    .animate-float-gentle,
+    .animate-glow-pulse {
+        animation: none;
+    }
+    /* One-shot celebratory overlays animate to opacity 0; without motion, hide them */
+    .animate-success-flash,
+    .animate-success-pop {
+        animation: none;
+        opacity: 0;
+    }
+    /* Continuous, decorative attention motion (running ping, "available" pulse) */
+    .animate-ping,
+    .animate-pulse {
+        animation: none;
+    }
+    /* tw-animate-css entrances/exits: keep the opacity fade, neutralize movement/zoom/blur */
+    [class*="animate-in"],
+    [class*="animate-out"] {
+        --tw-enter-translate-x: 0 !important;
+        --tw-enter-translate-y: 0 !important;
+        --tw-enter-scale: 1 !important;
+        --tw-enter-rotate: 0 !important;
+        --tw-enter-blur: 0 !important;
+        --tw-exit-translate-x: 0 !important;
+        --tw-exit-translate-y: 0 !important;
+        --tw-exit-scale: 1 !important;
+        --tw-exit-rotate: 0 !important;
+        --tw-exit-blur: 0 !important;
+    }
+    /* Card lift + sliding tab indicator should not move */
+    .surface-card-interactive:hover,
+    .surface-card-interactive:active {
+        transform: none;
+    }
+    .tab-indicator {
+        transition: opacity var(--motion-fast) linear !important;
     }
 }

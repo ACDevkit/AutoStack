@@ -1,30 +1,15 @@
 import { useEffect, useState, useRef } from "react";
-import { FolderOpen, ChevronDown, RefreshCw, CheckCircle2, AlertCircle, ArrowDownToLine } from "lucide-react";
+import {
+  FolderOpen, ChevronDown, RefreshCw, CheckCircle2, AlertCircle, ArrowDownToLine,
+  Globe, Rocket, Palette, Sun, Moon, Monitor, GitBranch, type LucideIcon,
+} from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getVersion } from "@tauri-apps/api/app";
 import { useSettingsStore, type AppLanguage, type AppTheme } from "@/stores/settingsStore";
+import Toggle from "@/components/ui/toggle";
+import { cn } from "@/lib/utils";
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
-
-function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      onClick={() => onChange(!checked)}
-      className={`relative w-10 h-6 rounded-full transition-colors duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-        checked ? "bg-primary" : "bg-secondary border border-border"
-      }`}
-    >
-      <span
-        className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-200 ${
-          checked ? "translate-x-4" : "translate-x-0"
-        }`}
-      />
-    </button>
-  );
-}
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -32,7 +17,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/50 mb-2 px-1">
         {title}
       </p>
-      <div className="bg-card border border-border rounded-lg divide-y divide-border/60">
+      <div className="surface-card rounded-xl divide-y divide-border/60">
         {children}
       </div>
     </div>
@@ -40,21 +25,30 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function SettingRow({
+  icon: Icon,
   label,
   description,
   children,
 }: {
+  icon?: LucideIcon;
   label: string;
   description?: string;
   children: React.ReactNode;
 }) {
   return (
     <div className="flex items-center justify-between gap-10 px-5 py-4">
-      <div className="min-w-0">
-        <p className="text-sm font-medium text-foreground leading-snug">{label}</p>
-        {description && (
-          <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{description}</p>
+      <div className="flex items-center gap-3 min-w-0">
+        {Icon && (
+          <div className="w-8 h-8 rounded-lg bg-secondary/60 ring-1 ring-border flex items-center justify-center shrink-0">
+            <Icon className="w-4 h-4 text-muted-foreground" />
+          </div>
         )}
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-foreground leading-snug">{label}</p>
+          {description && (
+            <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{description}</p>
+          )}
+        </div>
       </div>
       <div className="shrink-0">{children}</div>
     </div>
@@ -75,10 +69,10 @@ const LANGUAGES: { code: AppLanguage; label: string }[] = [
   { code: "ko", label: "한국어" },
 ];
 
-const THEMES: { value: AppTheme; label: string }[] = [
-  { value: "dark", label: "Dark" },
-  { value: "light", label: "Light" },
-  { value: "system", label: "System" },
+const THEMES: { value: AppTheme; label: string; icon: LucideIcon }[] = [
+  { value: "dark", label: "Dark", icon: Moon },
+  { value: "light", label: "Light", icon: Sun },
+  { value: "system", label: "System", icon: Monitor },
 ];
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
@@ -161,6 +155,7 @@ export default function SettingsPage() {
         <Section title="General">
           {/* Language */}
           <SettingRow
+            icon={Globe}
             label="Language"
             description="Select the display language for the application."
           >
@@ -182,6 +177,7 @@ export default function SettingsPage() {
 
           {/* Auto Launch */}
           <SettingRow
+            icon={Rocket}
             label="Auto Launch on PC Startup"
             description="Automatically open AutoStack when you log in to Windows."
           >
@@ -190,6 +186,7 @@ export default function SettingsPage() {
 
           {/* Default Project Location */}
           <SettingRow
+            icon={FolderOpen}
             label="Default Project Location"
             description="The folder where new projects will be created by default."
           >
@@ -216,26 +213,32 @@ export default function SettingsPage() {
         {/* Appearance */}
         <Section title="Appearance">
           <SettingRow
+            icon={Palette}
             label="Theme"
             description="Choose how AutoStack looks on your screen."
           >
-            <div className="flex rounded-md border border-border overflow-hidden">
-              {THEMES.map((t, i) => (
-                <button
-                  key={t.value}
-                  type="button"
-                  onClick={() => setTheme(t.value)}
-                  className={`px-4 h-8 text-xs font-medium transition-colors ${
-                    i > 0 ? "border-l border-border" : ""
-                  } ${
-                    theme === t.value
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:text-foreground hover:bg-secondary"
-                  }`}
-                >
-                  {t.label}
-                </button>
-              ))}
+            <div className="flex rounded-md border border-border overflow-hidden bg-secondary/40">
+              {THEMES.map((t, i) => {
+                const Icon = t.icon;
+                const active = theme === t.value;
+                return (
+                  <button
+                    key={t.value}
+                    type="button"
+                    onClick={() => setTheme(t.value)}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 px-3.5 h-8 text-xs font-medium transition-colors duration-200",
+                      i > 0 && "border-l border-border",
+                      active
+                        ? "bg-primary text-primary-foreground"
+                        : "text-muted-foreground hover:text-foreground hover:bg-secondary",
+                    )}
+                  >
+                    <Icon className="w-3.5 h-3.5" />
+                    {t.label}
+                  </button>
+                );
+              })}
             </div>
           </SettingRow>
         </Section>
@@ -243,6 +246,7 @@ export default function SettingsPage() {
         {/* Updates */}
         <Section title="Updates">
           <SettingRow
+            icon={RefreshCw}
             label="Updates"
             description="Check for new releases and keep AutoStack on the latest version."
           >
@@ -273,7 +277,7 @@ export default function SettingsPage() {
 
               {/* up to date */}
               {updateStatus.kind === "up-to-date" && (
-                <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                <span className="inline-flex items-center gap-1.5 text-xs font-medium text-success animate-in fade-in zoom-in-95 duration-200">
                   <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
                   Already up to date
                 </span>
@@ -299,7 +303,7 @@ export default function SettingsPage() {
               {/* error */}
               {updateStatus.kind === "error" && (
                 <>
-                  <span className="inline-flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+                  <span className="inline-flex items-center gap-1.5 text-xs text-warning animate-in fade-in zoom-in-95 duration-200">
                     <AlertCircle className="w-3.5 h-3.5 shrink-0" />
                     {updateStatus.message}
                   </span>
@@ -318,6 +322,7 @@ export default function SettingsPage() {
 
           {/* Release channel — placeholder for future use */}
           <SettingRow
+            icon={GitBranch}
             label="Release Channel"
             description="Stable receives tested releases. Beta gets early access to new features."
           >

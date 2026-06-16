@@ -4,15 +4,15 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import {
-  AlertCircle, Download, FolderOpen,
-  Loader2, Play, RotateCcw, Square, Settings2, ArrowLeft,
+  Container, Cpu, Download, FolderOpen,
+  Loader2, Play, RotateCcw, Server, Square, Settings2, ArrowLeft,
+  Check, SquareTerminal, Eraser,
 } from "lucide-react";
-import type { Project, ProjectStatus } from "@/types";
+import type { Project } from "@/types";
 import type { ProjectTabView } from "@/App";
 import { useProjectStore } from "@/stores/projectStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { getFrameworkById } from "@/lib/frameworks";
-import { FrameworkIcon } from "@/components/FrameworkSelect";
 import { installProject, type InstallOutput } from "@/lib/installer";
 import { prepareDockerRuntime } from "@/lib/docker";
 import { processManager, type RunPhase } from "@/lib/processManager";
@@ -21,77 +21,18 @@ import {
   deriveDefaultStartupCommand,
   normalizeRuntimeSettings,
 } from "@/lib/projectRuntime";
-
-// ─── Status helpers ────────────────────────────────────────────────────────────
-
-function deriveStatus(project: Project): ProjectStatus {
-  if (!project.path || project.path.trim() === "") return "not-setup";
-  return "offline";
-}
-
-function StatusBadge({ status, message }: { status: ProjectStatus; message?: string }) {
-  if (status === "not-setup") {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-400">
-        <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-        Setup required
-      </span>
-    );
-  }
-  if (status === "online") {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
-        <span className="relative flex h-2 w-2 shrink-0">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-60" />
-          <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
-        </span>
-        Online
-      </span>
-    );
-  }
-  if (status === "error") {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-red-600 dark:text-red-400">
-        <span className="h-2 w-2 rounded-full bg-red-500 shrink-0" />
-        {message ?? "Error"}
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-      <span className="h-2 w-2 rounded-full bg-muted-foreground/40 shrink-0" />
-      Offline
-    </span>
-  );
-}
-
-function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      onClick={() => onChange(!checked)}
-      className={`relative w-10 h-6 rounded-full transition-colors duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-        checked ? "bg-primary" : "bg-secondary border border-border"
-      }`}
-    >
-      <span
-        className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-200 ${
-          checked ? "translate-x-4" : "translate-x-0"
-        }`}
-      />
-    </button>
-  );
-}
+import { deriveProjectStatus } from "@/lib/status";
+import Toggle from "@/components/ui/toggle";
+import StatusBadge from "@/components/ui/status-badge";
+import FrameworkAvatar from "@/components/ui/framework-avatar";
 
 // ─── Terminal theme ────────────────────────────────────────────────────────────
 
 const TERM_THEME = {
-  background:          "#0d0d0d",
+  background:          "#0a0a0a",
   foreground:          "#d4d4d4",
   cursor:              "#7c6af7",
-  cursorAccent:        "#0d0d0d",
+  cursorAccent:        "#0a0a0a",
   selectionBackground: "rgba(124, 106, 247, 0.25)",
   black:               "#1a1a1a",
   red:                 "#f38ba8",
@@ -153,12 +94,20 @@ export default function ProjectPage({
     () => processManager.getPhase(project.id),
   );
 
+  // One-shot success "check pop" shown when install finishes or the server starts.
+  const [successPop, setSuccessPop] = useState(0);
+  const triggerSuccessPop = () => setSuccessPop((k) => k + 1);
+
   // ── Subscribe to phase changes ───────────────────────────────────────────────
   useEffect(() => {
     setRunPhase(processManager.getPhase(project.id));
 
     const unsub = processManager.subscribePhase(project.id, (phase) => {
-      setRunPhase(phase);
+      setRunPhase((prev) => {
+        // Celebrate the transition into a live server.
+        if (phase === "running" && prev !== "running") triggerSuccessPop();
+        return phase;
+      });
       // Write a shell prompt decoration after the process finishes so the user
       // has a clear visual boundary between server output and the next prompt.
       if (phase === "stopped" || phase === "error") {
@@ -416,6 +365,7 @@ export default function ProjectPage({
         }
       }
       setInstallPhase("idle");
+      triggerSuccessPop();
       termRef.current?.writeln("");
       // Re-open the shell in the newly created project directory.
       const dim  = fitRef.current?.proposeDimensions() ?? { cols: 80, rows: 24 };
@@ -486,38 +436,25 @@ export default function ProjectPage({
 
   // ── Derived state ─────────────────────────────────────────────────────────────
 
-  const baseStatus = deriveStatus(project);
-  const isNotSetup = baseStatus === "not-setup";
-
-  const displayStatus: ProjectStatus =
-    runPhase === "running"                ? "online"
-    : runPhase === "error" && !isNotSetup ? "error"
-    : baseStatus;
+  const displayStatus = deriveProjectStatus(project, runPhase);
+  const isNotSetup    = displayStatus === "not-setup";
 
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* ── Info header ─────────────────────────────────────────────────── */}
-      <div className="shrink-0 flex items-center gap-4 px-6 py-3.5 border-b border-border bg-card/60 backdrop-blur-sm">
+      <div className="relative shrink-0 flex items-center gap-4 px-6 py-3.5 border-b border-border bg-card/60 backdrop-blur-sm">
+
+        {/* Live accent line while the dev server is running */}
+        {runPhase === "running" && (
+          <div
+            aria-hidden
+            className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-success/60 to-transparent animate-in fade-in duration-500 pointer-events-none"
+          />
+        )}
 
         {/* Framework icon */}
-        {(() => {
-          const fw = getFrameworkById(project.templateId);
-          return fw ? (
-            <div
-              className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0"
-              style={{
-                backgroundColor: `color-mix(in oklch, ${fw.color} 12%, transparent)`,
-                boxShadow:       `0 0 0 1px color-mix(in oklch, ${fw.color} 25%, transparent)`,
-              }}
-            >
-              <FrameworkIcon fw={fw} size={20} />
-            </div>
-          ) : (
-            <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 bg-secondary/60 ring-1 ring-border">
-              <span className="text-xs font-bold text-muted-foreground">?</span>
-            </div>
-          );
-        })()}
+        <FrameworkAvatar templateId={project.templateId} />
+
 
         {/* Name + framework label */}
         {(() => {
@@ -541,21 +478,35 @@ export default function ProjectPage({
         {/* ── Status + action group ───────────────────────────────────── */}
         <div className="flex items-center gap-2 shrink-0">
 
-          {/* Status badge */}
-          <StatusBadge status={displayStatus} />
+          {/* One-shot success check-pop (install done / server started) */}
+          {successPop > 0 && (
+            <span
+              key={successPop}
+              aria-hidden
+              className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-success-soft text-success animate-success-pop"
+            >
+              <Check className="w-3 h-3" />
+            </span>
+          )}
+
+          {!isNotSetup && <StatusBadge status={displayStatus} size="md" />}
 
           {/* ── INSTALL flow ────────────────────────────────────────────── */}
           {isNotSetup && installPhase === "idle" && (
             <button
               onClick={handleInstall}
-              className="inline-flex items-center gap-1.5 h-7 px-3 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 active:scale-95 transition-all duration-150"
+              className="inline-flex items-center gap-1.5 h-7 px-3 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary-emphasis active:scale-95 transition-all duration-150 animate-in fade-in zoom-in-95"
+              style={{
+                boxShadow:
+                  "0 2px 10px -2px color-mix(in oklch, var(--primary) 40%, transparent)",
+              }}
             >
               <Download className="w-3 h-3" />
               Install Project
             </button>
           )}
           {isNotSetup && installPhase === "installing" && (
-            <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+            <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground animate-in fade-in zoom-in-95">
               <Loader2 className="w-3 h-3 animate-spin" />
               Installing…
             </span>
@@ -564,7 +515,7 @@ export default function ProjectPage({
             <button
               onClick={() => { setInstallPhase("idle"); setInstallError(null); }}
               title={installError ?? undefined}
-              className="inline-flex items-center gap-1.5 h-7 px-3 text-xs font-medium text-destructive border border-destructive/30 rounded-md hover:bg-destructive/10 active:scale-95 transition-all duration-150"
+              className="inline-flex items-center gap-1.5 h-7 px-3 text-xs font-medium text-danger border border-danger/30 rounded-md hover:bg-danger-soft active:scale-95 transition-all duration-150 animate-in fade-in zoom-in-95"
             >
               <RotateCcw className="w-3 h-3" />
               Retry
@@ -577,13 +528,17 @@ export default function ProjectPage({
               onClick={handleStart}
               aria-label="Start project"
               title="Start project"
-              className="inline-flex items-center justify-center h-7 w-7 text-xs font-medium bg-emerald-600 text-white rounded-md hover:bg-emerald-500 active:scale-95 transition-all duration-150"
+              className="inline-flex items-center justify-center h-7 w-7 text-xs font-medium bg-emerald-600 text-white rounded-md hover:bg-emerald-500 active:scale-95 transition-all duration-150 animate-in fade-in zoom-in-95"
+              style={{
+                boxShadow:
+                  "0 2px 10px -2px color-mix(in oklch, var(--success) 35%, transparent)",
+              }}
             >
               <Play className="w-3 h-3 fill-current" />
             </button>
           )}
           {!isNotSetup && runPhase === "starting" && (
-            <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+            <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground animate-in fade-in zoom-in-95">
               <Loader2 className="w-3 h-3 animate-spin" />
               Starting…
             </span>
@@ -591,7 +546,11 @@ export default function ProjectPage({
           {!isNotSetup && runPhase === "running" && (
             <button
               onClick={handleStop}
-              className="inline-flex items-center gap-1.5 h-7 px-3 text-xs font-medium bg-red-600/90 text-white rounded-md hover:bg-red-500 active:scale-95 transition-all duration-150"
+              className="inline-flex items-center gap-1.5 h-7 px-3 text-xs font-medium bg-red-600/90 text-white rounded-md hover:bg-red-500 active:scale-95 transition-all duration-150 animate-in fade-in zoom-in-95"
+              style={{
+                boxShadow:
+                  "0 2px 10px -2px color-mix(in oklch, var(--danger) 35%, transparent)",
+              }}
             >
               <Square className="w-3 h-3 fill-current" />
               Stop
@@ -602,13 +561,13 @@ export default function ProjectPage({
               onClick={handleStart}
               aria-label="Restart project"
               title="Restart project"
-              className="inline-flex items-center justify-center h-7 w-7 text-xs font-medium text-amber-600 border border-amber-600/30 rounded-md hover:bg-amber-600/10 active:scale-95 transition-all duration-150"
+              className="inline-flex items-center justify-center h-7 w-7 text-xs font-medium text-warning border border-warning/30 rounded-md hover:bg-warning-soft active:scale-95 transition-all duration-150 animate-in fade-in zoom-in-95"
             >
               <RotateCcw className="w-3 h-3" />
             </button>
           )}
 
-          {viewMode === "console" ? (
+          {viewMode === "console" && (
             <button
               onClick={() => onViewModeChange("settings")}
               aria-label="Project settings"
@@ -616,14 +575,6 @@ export default function ProjectPage({
               className="inline-flex items-center justify-center h-7 w-7 text-xs font-medium bg-secondary border border-border rounded-md text-foreground hover:bg-accent active:scale-95 transition-all duration-150"
             >
               <Settings2 className="w-3 h-3" />
-            </button>
-          ) : (
-            <button
-              onClick={() => onViewModeChange("console")}
-              className="inline-flex items-center gap-1.5 h-7 px-3 text-xs font-medium bg-secondary border border-border rounded-md text-foreground hover:bg-accent active:scale-95 transition-all duration-150"
-            >
-              <ArrowLeft className="w-3 h-3" />
-              Back to Console
             </button>
           )}
         </div>
@@ -652,26 +603,55 @@ export default function ProjectPage({
       {/* ── Project content ─────────────────────────────────────────────── */}
       <div className="flex-1 min-h-0">
         <div
-          className={`h-full min-h-0 relative overflow-hidden ${viewMode === "console" ? "block" : "hidden"}`}
+          className={`h-full min-h-0 flex flex-col ${viewMode === "console" ? "" : "hidden"}`}
           style={{ backgroundColor: TERM_THEME.background }}
         >
-          <div
-            ref={termContainerRef}
-            className="absolute inset-0"
-            style={{ padding: "10px 12px" }}
-          />
+          {/* Terminal toolbar */}
+          <div className="flex items-center justify-between px-3 h-8 shrink-0 border-b border-white/[0.06] select-none">
+            <span className="flex items-center gap-1.5 text-[11px] font-medium tracking-wide text-white/40">
+              <SquareTerminal className="w-3.5 h-3.5" />
+              Console
+            </span>
+            <button
+              onClick={() => termRef.current?.clear()}
+              title="Clear console"
+              className="inline-flex items-center gap-1.5 h-6 px-2 rounded text-[11px] font-medium text-white/40 hover:text-white/80 hover:bg-white/[0.06] active:scale-95 transition-all duration-150"
+            >
+              <Eraser className="w-3 h-3" />
+              Clear
+            </button>
+          </div>
+
+          {/* Terminal surface */}
+          <div className="relative flex-1 min-h-0">
+            <div
+              ref={termContainerRef}
+              className="absolute inset-0"
+              style={{ padding: "10px 12px" }}
+            />
+          </div>
         </div>
 
         {viewMode === "settings" && (
           <div className="h-full min-h-0 overflow-y-auto bg-background">
             <div className="max-w-3xl mx-auto px-8 py-8">
-              <div className="mb-7">
+              <div className="mb-7 flex items-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => onViewModeChange("console")}
+                  aria-label="Back to console"
+                  title="Back to console"
+                  className="w-8 h-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0 -ml-1"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                </button>
                 <h2 className="text-lg font-semibold text-foreground">Project Settings</h2>
               </div>
 
               {project.useDocker && (
-                <section className="bg-card border border-border rounded-lg overflow-hidden">
-                  <div className="px-5 py-3 border-b border-border/70">
+                <section className="surface-card rounded-xl overflow-hidden">
+                  <div className="px-5 py-3 border-b border-border/70 flex items-center gap-2">
+                    <Container className="w-3.5 h-3.5 text-muted-foreground/60 shrink-0" />
                     <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground/60">
                       Container Runtime
                     </p>
@@ -695,14 +675,15 @@ export default function ProjectPage({
                     ) : (
                       <p>Docker runtime metadata will be generated after install/start.</p>
                     )}
-                    {dockerError && <p className="text-amber-500">Last Docker error: {dockerError}</p>}
+                    {dockerError && <p className="text-warning">Last Docker error: {dockerError}</p>}
                   </div>
                 </section>
               )}
 
               <div className="space-y-6">
-                <section className="bg-card border border-border rounded-lg overflow-hidden">
-                  <div className="px-5 py-3 border-b border-border/70">
+                <section className="surface-card rounded-xl overflow-hidden">
+                  <div className="px-5 py-3 border-b border-border/70 flex items-center gap-2">
+                    <Cpu className="w-3.5 h-3.5 text-muted-foreground/60 shrink-0" />
                     <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground/60">
                       Runtime
                     </p>
@@ -768,8 +749,9 @@ export default function ProjectPage({
                   </div>
                 </section>
 
-                <section className="bg-card border border-border rounded-lg overflow-hidden">
-                  <div className="px-5 py-3 border-b border-border/70">
+                <section className="surface-card rounded-xl overflow-hidden">
+                  <div className="px-5 py-3 border-b border-border/70 flex items-center gap-2">
+                    <Server className="w-3.5 h-3.5 text-muted-foreground/60 shrink-0" />
                     <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground/60">
                       Dev Server
                     </p>
@@ -812,7 +794,7 @@ export default function ProjectPage({
                 <div className="flex justify-end">
                   <button
                     onClick={() => onViewModeChange("console")}
-                    className="inline-flex items-center gap-1.5 h-9 px-4 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 active:scale-95 transition-all duration-150"
+                    className="inline-flex items-center gap-1.5 h-9 px-4 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary-emphasis active:scale-95 transition-all duration-150"
                   >
                     Done
                   </button>

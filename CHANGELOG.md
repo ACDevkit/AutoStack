@@ -135,6 +135,42 @@ autostack/
 
 ---
 
+## [v0.1.3] — 2026-06-16
+
+### UI / Theme Revamp — Premium Polish & Motion
+
+**Files:** `index.css`, `App.tsx`, `ProjectCard.tsx`, `TopNav.tsx`, `ProjectPage.tsx`, `CreateProjectModal.tsx`, `FrameworkSelect.tsx`, `SettingsPage.tsx`, `EmptyState.tsx`, `WindowControls.tsx`, `ui/toggle.tsx`, `ui/status-badge.tsx`, `ui/framework-avatar.tsx`, `lib/status.ts`
+
+**Added**
+- New design-token system in Tailwind v4 `@theme`: layered surfaces, brand/semantic status colors, elevation shadows, and motion (timing/easing) tokens — full light + dark sets
+- Shared UI primitives: `Toggle`, `StatusBadge`, `FrameworkAvatar`, and a `deriveProjectStatus` / run-phase status helper
+- Dashboard: grid/list view toggle, status filter (All / Online / Offline / Setup), live online + needs-setup stat chips, and a sticky header that blurs on scroll
+- Empty state wired in with a brand-gradient icon, gentle motion, and quick-start framework chips that pre-select in the create modal
+- ProjectCard: framework avatar tile, clearer status pills, depth + hover glow, a two-step delete confirm, and a compact list layout
+- TopNav: sliding active-tab indicator, per-tab live status dots, and search focus animation
+- ProjectPage: terminal toolbar (Console label + Clear), success check-pop, cross-fading run-state action buttons, and a simple back control beside the Project Settings title
+- CreateProjectModal: spring entrance/exit, Esc-to-close, focus trap, optional framework pre-selection, and Docker off by default
+- FrameworkSelect: in-dropdown search/filter with brand-tinted rows
+- SettingsPage: per-row icons and a segmented theme control (Dark / Light / System)
+- Motion system: staggered card entrance, hover lift, modal spring, dropdown entrances, and `prefers-reduced-motion` support throughout
+
+**Changed**
+- Retuned the dark palette for more depth (layered surfaces, subtle gradients, lit-from-above borders) while keeping the calm near-black base
+- Consolidated duplicate toggle and status-badge implementations into single shared components
+- Applied semantic color tokens consistently across cards, headers, and status states
+- Retuned the terminal theme (`TERM_THEME`) to match the new palette
+- Project settings navigation simplified — removed the toolbar “Back to Console” button; back is now an icon beside the settings heading
+- Running projects no longer get a green card glow or success flash when returning to the dashboard — status stays in the badge only
+
+**Removed**
+- Colored left accent stripe on project cards
+- Green celebration overlay on project cards when a server comes online
+
+**Notes**
+- Visual + interaction revamp only — no changes to data shapes, persistence, process/PTY wiring, or window controls
+
+---
+
 ## [v0.1.2] — 2026-05-29
 
 ### Runtime Settings Wiring + Package Manager Reliability
