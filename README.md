@@ -21,7 +21,6 @@
 ### 📝 Current Internal Development Notes
 
 * Fixing Updating / Auto-Launch on PC / Language
-* Implementing Project Search bar
 * *(various other things as we are in very early development)*
 
 ---
