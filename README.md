@@ -8,7 +8,7 @@ A desktop app for scaffolding and running dev projects without leaving the windo
 
 ---
 
-AutoStack is a Tauri desktop app with a React UI. You pick a framework, it scaffolds the project, installs dependencies, and runs the dev server — output goes into a built-in terminal. No extra cmd windows popping up on Windows.
+AutoStack is a Tauri desktop app with a React UI. You pick a framework, it scaffolds the project, installs dependencies, and runs the dev server, output goes into a built-in terminal. No extra cmd windows popping up on Windows.
 
 Good for keeping a few side projects in one place. Still early, I built it mainly as a portfolio piece and use it when I want to spin something up quickly.
 
