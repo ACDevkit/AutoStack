@@ -2,37 +2,47 @@
 
 # AutoStack
 
+A desktop app for scaffolding and running dev projects without leaving the window.
+
 </div>
 
 ---
 
-### ⚠️ IMPORTANT WARNING ⚠️
+AutoStack is a Tauri desktop app with a React UI. You pick a framework, it scaffolds the project, installs dependencies, and runs the dev server — output goes into a built-in terminal. No extra cmd windows popping up on Windows.
 
-> This project is in **VERY EARLY DEVELOPMENT**.
->
-> * The current releases are incomplete.
-> * The source code is experimental.
-> * It is likely to be buggy or break without notice.
-> * **Use for testing purposes only.**
-> * Update detection / auto-updating does not work at all.
+Good for keeping a few side projects in one place. Still early — I built it mainly as a portfolio piece and use it when I want to spin something up quickly.
+
+### What it does
+
+- Create projects (React, Vite, Next.js, FastAPI, Django, Go, Rust, Laravel, .NET, and others)
+- Install dependencies from the UI
+- Start/stop dev servers with a real embedded terminal (keyboard input, Ctrl+C, ANSI colors)
+- Optional Docker mode when creating a project
+- Per-project runtime settings (package manager, startup command, etc.)
+- Dashboard with project status, grid/list view, search
+
+### What doesn't work yet
+
+Early development — some settings are placeholders (auto-launch, updates, release channel, language). Update checking isn't wired up. Expect rough edges.
 
 ---
 
-### 📝 Current Internal Development Notes
+## Install
 
-* Fixing Updating / Auto-Launch on PC / Language
-* *(various other things as we are in very early development)*
+**Pre-built (easiest)**
 
----
+1. Go to [Releases](https://github.com/ACDevkit/AutoStack/releases)
+2. Download the installer for your OS (Windows `.msi`/`.exe`, macOS `.dmg`, Linux `.AppImage`/`.deb`)
+3. Run it
 
-### 📸 App Screenshots
+You'll need the usual tooling on your machine for whatever framework you pick (Node/npm for frontend stuff, Python for FastAPI/Django, etc.). AutoStack runs the commands — it doesn't install Node or Python for you.
 
-<div align="center">
-  <br>
-  <img width="1280" height="820" alt="autostack screenshot 1" src="https://github.com/user-attachments/assets/9f252e17-2b5e-462c-95bd-f791ad8cb2d5" />
-  <br><br>
-  <img width="1280" height="820" alt="autostack screenshot 2" src="https://github.com/user-attachments/assets/3596c61c-6f5c-4534-b666-f5997f861b58" />
-  <br><br>
-  <img width="1280" height="820" alt="autostack screenshot 3" src="https://github.com/user-attachments/assets/cd741f81-749e-4966-9e59-d30e6b79ac5f" />
-  <br>
-</div>
+**From source**
+
+Requirements: [Node.js](https://nodejs.org/) (LTS), [Rust](https://rustup.rs/), and on Windows the MSVC build tools Rust expects.
+
+```bash
+git clone https://github.com/ACDevkit/AutoStack.git
+cd AutoStack
+npm install
+npm run tauri dev
