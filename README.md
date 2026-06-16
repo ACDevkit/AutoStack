@@ -30,11 +30,10 @@
 
 <div align="center">
   <br>
-  <img width="1280" height="820" alt="autostack screenshot 1" src="https://github.com/user-attachments/assets/14eb6d72-ada4-45b3-95bc-468d5c67d31f" />
+  <img width="1280" height="820" alt="autostack screenshot 1" src="https://github.com/user-attachments/assets/9f252e17-2b5e-462c-95bd-f791ad8cb2d5" />
   <br><br>
-  <img width="1280" height="820" alt="autostack screenshot 2" src="https://github.com/user-attachments/assets/48c6c939-3fc6-4375-b282-21dc81203447" />
+  <img width="1280" height="820" alt="autostack screenshot 2" src="https://github.com/user-attachments/assets/3596c61c-6f5c-4534-b666-f5997f861b58" />
   <br><br>
-  <img width="1280" height="820" alt="autostack screenshot 3" src="https://github.com/user-attachments/assets/6c529601-83ce-47e2-a3c5-55a5eee9b4df" />
+  <img width="1280" height="820" alt="autostack screenshot 3" src="https://github.com/user-attachments/assets/cd741f81-749e-4966-9e59-d30e6b79ac5f" />
   <br>
 </div>
-
