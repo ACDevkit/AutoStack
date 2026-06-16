@@ -35,7 +35,7 @@ Early development — some settings are placeholders (auto-launch, updates, rele
 2. Download the installer for your OS (Windows `.msi`/`.exe`, macOS `.dmg`, Linux `.AppImage`/`.deb`)
 3. Run it
 
-You'll need the usual tooling on your machine for whatever framework you pick (Node/npm for frontend stuff, Python for FastAPI/Django, etc.). AutoStack runs the commands — it doesn't install Node or Python for you.
+You'll need the usual tooling on your machine for whatever framework you pick (Node/npm for frontend stuff, Python for FastAPI/Django, etc.). AutoStack runs the commands, it doesn't install Node or Python for you.
 
 **From source**
 
